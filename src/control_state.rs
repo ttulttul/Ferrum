@@ -35,6 +35,10 @@ pub struct ControlState {
     /// Child results become visible before their checkpoint is captured. The next
     /// message to that child queues behind the checkpoint, as on the reference.
     pub(crate) checkpoint_pending: StdMutex<HashMap<String, Instant>>,
+    /// The turn item updates an idle provider CLI's events made, by thread, held for the
+    /// thread's next provider event (the reference's provider commit batch keeps an idle
+    /// stream's snapshots until the stream next reports).
+    idle_snapshots: StdMutex<HashMap<String, Vec<Value>>>,
     /// Runs a steering restart is starting over in place, with what their
     /// next attempt runs: their turn's end starts it instead of ending the
     /// run.
@@ -88,6 +92,7 @@ impl ControlState {
             store: RwLock::new(store),
             thread_launch: Mutex::new(()),
             checkpoint_pending: StdMutex::new(HashMap::new()),
+            idle_snapshots: StdMutex::new(HashMap::new()),
             steering_restarts: Mutex::new(HashMap::new()),
             #[cfg(feature = "native")]
             thread_deleted: Default::default(),
@@ -370,6 +375,14 @@ impl ControlState {
         self.commit_with(event, None, &suppress).await
     }
 
+    /// `commit` of what a provider CLI reported while no turn ran: its turn item updates stream
+    /// with the thread's next provider event, as the reference's provider commit batch keeps an
+    /// idle stream's snapshots until the stream next reports.
+    pub(crate) async fn commit_idle(&self, event: Event) -> anyhow::Result<ServerEvent> {
+        self.commit_with(event, None, &[HOLD_IDLE_SNAPSHOTS.to_owned()])
+            .await
+    }
+
     /// Writes one event to the shared database (when there is one), appends
     /// it to the log, applies it to the store and broadcasts it.
     pub(crate) async fn commit_receipted(
@@ -487,6 +500,9 @@ impl ControlState {
         if self.events.receiver_count() > 0 {
             let _phase = crate::commit_timing::phase("live events (thread_events)");
             if let Some(mut events) = thread_events(&store, &record, &stored_after, suppress) {
+                if let Some(items) = events.items.as_mut() {
+                    self.hold_idle_snapshots(&events.thread_id, &record.event, suppress, items);
+                }
                 live_events = events.items.as_ref().map_or(0, Vec::len) as u64;
                 record.id = *next_event_id + live_events.max(stored_events).max(1);
                 if let Some(items) = events.items.take() {
@@ -681,6 +697,52 @@ pub(crate) fn coalesce(batch: &[Vec<String>]) -> Vec<Vec<String>> {
     dropped
 }
 
+/// Marks a commit of what a provider CLI reported while no turn ran ([`ControlState::commit_idle`]).
+const HOLD_IDLE_SNAPSHOTS: &str = "hold-idle-snapshots";
+
+impl ControlState {
+    /// An idle provider event's turn item updates wait for the thread's next provider event,
+    /// which streams them first.
+    fn hold_idle_snapshots(
+        &self,
+        thread_id: &str,
+        event: &Event,
+        suppress: &[String],
+        items: &mut Vec<Value>,
+    ) {
+        let mut held = self
+            .idle_snapshots
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let idle = suppress.iter().any(|key| key == HOLD_IDLE_SNAPSHOTS);
+        let provider = matches!(event, Event::RunProvider { .. });
+        hold_or_release(
+            held.entry(thread_id.to_owned()).or_default(),
+            idle,
+            provider,
+            items,
+        );
+        if held.get(thread_id).is_some_and(Vec::is_empty) {
+            held.remove(thread_id);
+        }
+    }
+}
+
+/// An idle commit's turn item updates go to `held`; a later provider commit streams what is
+/// held first.
+fn hold_or_release(held: &mut Vec<Value>, idle: bool, provider: bool, items: &mut Vec<Value>) {
+    if idle {
+        let (snapshots, rest): (Vec<Value>, Vec<Value>) =
+            std::mem::take(items).into_iter().partition(|item| {
+                snapshot_key(item).is_some_and(|key| key.starts_with("turn-item.updated:"))
+            });
+        *items = rest;
+        held.extend(snapshots);
+    } else if provider {
+        items.splice(0..0, std::mem::take(held));
+    }
+}
+
 fn thread_events(
     store: &Store,
     record: &ServerEvent,
@@ -802,7 +864,34 @@ fn read_by_id(documents: &dyn DocumentStore, path: &std::path::Path) -> IndexMap
 
 #[cfg(test)]
 mod tests {
-    use super::coalesce;
+    use super::{coalesce, hold_or_release};
+    use serde_json::json;
+
+    #[test]
+    fn an_idle_turn_item_update_streams_with_the_threads_next_provider_event() {
+        let item = |kind: &str, id: &str| json!({"type": kind, "payload": {"id": id}});
+        let mut held = Vec::new();
+        let mut idle = vec![
+            item("subagent.updated", "s"),
+            item("turn-item.updated", "i"),
+        ];
+        hold_or_release(&mut held, true, true, &mut idle);
+        assert_eq!(idle, [item("subagent.updated", "s")]);
+        // Another commit that is no provider event leaves it held.
+        let mut other = vec![item("run.created", "r")];
+        hold_or_release(&mut held, false, false, &mut other);
+        assert_eq!(other.len(), 1);
+        let mut next = vec![item("subagent.updated", "s")];
+        hold_or_release(&mut held, false, true, &mut next);
+        assert_eq!(
+            next,
+            [
+                item("turn-item.updated", "i"),
+                item("subagent.updated", "s")
+            ]
+        );
+        assert!(held.is_empty());
+    }
 
     fn keys(batch: &[&[&str]]) -> Vec<Vec<String>> {
         batch

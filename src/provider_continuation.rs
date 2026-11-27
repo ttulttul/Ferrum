@@ -12,7 +12,7 @@
 //! its wake, so the CLI drops what it would have shown and reports the next
 //! one (`onRunEndedWithoutStarting`).
 use crate::orchestration::{delegation::join_id, CommandHost};
-use crate::workspace::provider::ProviderWake;
+use crate::workspace::provider::{ProviderIdleEvent, ProviderWake};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -62,6 +62,54 @@ pub(crate) async fn run<H: CommandHost + 'static>(
             let _held = lock.lock().await;
             dispatch(state, wake).await;
         });
+    }
+}
+
+/// Record what idle provider CLIs report on their threads' latest runs, as it arrives, as the
+/// reference's adapter writes an idle session's events: a background subagent's child
+/// answering updates the subagent of the run that started it, and its child thread.
+pub(crate) async fn record_idle<H: CommandHost + 'static>(
+    state: Arc<H>,
+    mut events: mpsc::UnboundedReceiver<ProviderIdleEvent>,
+) {
+    while let Some(idle) = events.recv().await {
+        // In order with the thread's continuations.
+        let lock = thread_lock(&idle.app_thread_id);
+        let _held = lock.lock().await;
+        let latest = {
+            let store = state.store.read().await;
+            store.threads.get(&idle.app_thread_id).and_then(|thread| {
+                thread
+                    .runs
+                    .iter()
+                    .max_by_key(|run| run.ordinal)
+                    .map(|run| (run.id, run.driver.clone()))
+            })
+        };
+        let Some((run_id, driver)) = latest else {
+            continue;
+        };
+        if let crate::workspace::ProviderEvent::TurnItem { item } = &idle.event {
+            crate::native_subagents::record_child(
+                &state,
+                &idle.app_thread_id,
+                driver
+                    .as_deref()
+                    .unwrap_or(crate::workspace::provider::CLAUDE_AGENT),
+                item,
+            )
+            .await;
+        }
+        let event = crate::store::Event::RunProvider {
+            run_id,
+            thread_id: idle.app_thread_id.clone(),
+            event: idle.event,
+            visible_text: None,
+            position: None,
+        };
+        if let Err(error) = state.commit_idle(event).await {
+            tracing::warn!(%error, thread = %idle.app_thread_id, "failed to record an idle provider event");
+        }
     }
 }
 

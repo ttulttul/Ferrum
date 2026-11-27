@@ -14,7 +14,8 @@
 //! ([`ProviderWake`]) so a continuation run can show it
 //! (`bufferWakeMessage` / `offerWakeContinuation` in the reference).
 use super::Cli;
-use crate::workspace::provider::{ProviderWake, CLAUDE_AGENT};
+use crate::workspace::provider::{ProviderIdleEvent, ProviderWake, CLAUDE_AGENT};
+use crate::workspace::ProviderEvent;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -37,16 +38,22 @@ pub(crate) struct Sessions {
     missing: Mutex<HashSet<String>>,
     wakes: mpsc::UnboundedSender<ProviderWake>,
     wake_receiver: Mutex<Option<mpsc::UnboundedReceiver<ProviderWake>>>,
+    /// What idle CLIs report as it arrives (a background subagent's child answering).
+    idle_events: mpsc::UnboundedSender<ProviderIdleEvent>,
+    idle_receiver: Mutex<Option<mpsc::UnboundedReceiver<ProviderIdleEvent>>>,
 }
 
 impl Default for Sessions {
     fn default() -> Self {
         let (wakes, receiver) = mpsc::unbounded_channel();
+        let (idle_events, idle_receiver) = mpsc::unbounded_channel();
         Sessions {
             live: Mutex::default(),
             missing: Mutex::default(),
             wakes,
             wake_receiver: Mutex::new(Some(receiver)),
+            idle_events,
+            idle_receiver: Mutex::new(Some(idle_receiver)),
         }
     }
 }
@@ -92,6 +99,14 @@ impl Sessions {
     /// their continuation runs.
     pub(crate) fn take_wakes(&self) -> Option<mpsc::UnboundedReceiver<ProviderWake>> {
         self.wake_receiver
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+    }
+
+    /// What idle CLIs report as it arrives; taken once, by the host that records it.
+    pub(crate) fn take_idle_events(&self) -> Option<mpsc::UnboundedReceiver<ProviderIdleEvent>> {
+        self.idle_receiver
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .take()
@@ -174,6 +189,7 @@ impl Sessions {
         let (control, commands) = mpsc::unbounded_channel();
         let reporter = Reporter {
             wakes: self.wakes.clone(),
+            idle_events: self.idle_events.clone(),
             route,
             session: session.clone(),
         };
@@ -236,11 +252,20 @@ impl Live {
 /// Reports an idle session's wakes.
 struct Reporter {
     wakes: mpsc::UnboundedSender<ProviderWake>,
+    idle_events: mpsc::UnboundedSender<ProviderIdleEvent>,
     route: WakeRoute,
     session: String,
 }
 
 impl Reporter {
+    /// Report what the idle CLI changed, for the thread's latest run.
+    fn record(&self, event: ProviderEvent) {
+        let _ = self.idle_events.send(ProviderIdleEvent {
+            app_thread_id: self.route.app_thread_id.clone(),
+            event,
+        });
+    }
+
     /// Report a wake, with what ended in the background since the last one; its
     /// token, once reported.
     fn report(&self, cli: &mut Cli) -> Option<u64> {
@@ -294,9 +319,9 @@ fn empty_task_notification_success(message: &Value) -> bool {
         && message["result"].as_str().is_none_or(str::is_empty)
 }
 
-/// Read the idle CLI until it is taken back. What it writes stays buffered,
-/// in order, for the next turn; the first wake boundary reports a wake, and
-/// no other is reported until that one is taken or retired.
+/// Read the idle CLI until it is taken back. A background subagent's own messages are recorded
+/// as they arrive; what else it writes stays buffered, in order, for the next turn; the first
+/// wake boundary reports a wake, and no other is reported until that one is taken or retired.
 async fn read_idle(
     mut cli: Cli,
     mut commands: mpsc::UnboundedReceiver<Control>,
@@ -321,8 +346,17 @@ async fn read_idle(
             line = cli.read_line(), if open => match line {
                 Some(line) => {
                     let boundary = wake_boundary(&line);
-                    if let Ok(message) = serde_json::from_str::<Value>(&line) {
-                        cli.background.observe_idle(&message);
+                    let message = serde_json::from_str::<Value>(&line).ok();
+                    if let Some(message) = &message {
+                        cli.background.observe_idle(message);
+                        // A background subagent's own message is recorded as it arrives, as
+                        // the reference's adapter routes it, not kept for the wake turn.
+                        if let Some(items) = super::claude::child_items(&mut cli.subagents, message) {
+                            for item in items {
+                                reporter.record(ProviderEvent::TurnItem { item });
+                            }
+                            continue;
+                        }
                     }
                     cli.buffer_line(line);
                     if boundary && reported.is_none() {
