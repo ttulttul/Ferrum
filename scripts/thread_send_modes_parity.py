@@ -11,7 +11,8 @@ second Claude thread:
 - sends with freshContext: the message starts a new provider session, without the earlier
   conversation (the CLI is started on a new session id, not resumed);
 - starts another turn and queues a freshContext message behind it: once that turn ends, the
-  message starts a new provider session too;
+  message starts a new provider session too; each fresh session runs on a provider thread of its
+  own, and the ones it leaves stay;
 - steers and restarts the idle thread: refused, as nothing runs there.
 
 Steers and restarts are retried while the target's turn has not started yet. Compared: every MCP
@@ -64,6 +65,19 @@ def target_cli(log):
     return list(pids.values())
 
 
+def provider_threads(view):
+    """The target's provider threads in order: each one's status, whether it names a native thread
+    and a session, its first and last run ordinals, and the ordinals of the runs that ran on it."""
+    threads = view.get("providerThreads", [])
+    out = []
+    for thread in threads:
+        ran = sorted(run.get("ordinal") for run in view.get("runs", []) if run.get("providerThreadId") == thread["id"])
+        out.append({"status": thread.get("status"), "native": thread.get("nativeThreadRef") is not None,
+                    "session": thread.get("providerSessionId") is not None,
+                    "runs": [thread.get("firstRunOrdinal"), thread.get("lastRunOrdinal")], "ran": ran})
+    return out
+
+
 def without_retries(lines):
     """MCP records without their retry counts: how long a turn takes to start differs by server."""
     out = []
@@ -114,6 +128,8 @@ def main():
                     "mcp answers": sorted(without_retries(agent_mcp(log, tmp))),
                     "target runs": runs(views[TARGET]),
                     "target cli": target_cli(log),
+                    # A fresh context opens a provider thread of its own; the one it leaves stays.
+                    "target provider threads": provider_threads(views[TARGET]),
                 }
                 results[side] = mask(record, server, tmp)
     if args.dump:

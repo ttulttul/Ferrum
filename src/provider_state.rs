@@ -401,14 +401,33 @@ impl ProviderState {
                         left.attachment_budget = self.attachment_budget.take();
                         self.other_threads.push(left);
                     }
+                    // The latest it left, when fresh sessions left several.
                     if let Some(at) = self
                         .other_threads
                         .iter()
-                        .position(|thread| thread.driver == *driver)
+                        .rposition(|thread| thread.driver == *driver)
                     {
                         let mut back = self.other_threads.remove(at);
                         self.attachment_budget = back.attachment_budget.take();
                         self.thread = Some(back);
+                    }
+                }
+                // A fresh session runs on a provider thread of its own, as the
+                // reference opens one for a fresh context's run; the one it
+                // leaves stays, idle.
+                if self.fresh_session
+                    && !self.detached_runs.contains(&run)
+                    && self
+                        .thread
+                        .as_ref()
+                        .is_some_and(|thread| thread.driver == *driver && thread.first_run != run)
+                {
+                    if let Some(mut left) = self.thread.take() {
+                        if left.status == "active" {
+                            left.status = "idle";
+                        }
+                        left.attachment_budget = self.attachment_budget.take();
+                        self.other_threads.push(left);
                     }
                 }
                 // The fresh session a turn opens is the one later turns resume.
@@ -859,6 +878,7 @@ impl ProviderState {
             .or_else(|| {
                 self.other_threads
                     .iter()
+                    .rev()
                     .find(|thread| thread.driver == driver && thread.status != "error")
                     .and_then(|thread| thread.native_id.clone())
             })
@@ -1128,6 +1148,43 @@ pub(crate) fn split_args(text: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_fresh_session_opens_its_own_provider_thread_and_leaves_the_last_idle() {
+        use uuid::Uuid;
+        let (first, second, fresh) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let mut state = ProviderState::default();
+        let thread = |id: &str| ProviderEvent::ProviderThread {
+            driver: provider::CLAUDE_AGENT.into(),
+            native_thread_id: id.into(),
+            resumed: false,
+            model: None,
+            opencode2: None,
+            native_title: None,
+            native_updated_at: None,
+            context_usage: None,
+            session_started: None,
+        };
+        state.apply(first, &thread("sess_1"), 1);
+        state.apply(second, &thread("sess_1"), 2);
+        assert_eq!(state.thread.as_ref().unwrap().first_run, first);
+        state.detach_session(3, &[], true);
+        assert_eq!(state.resume_for(provider::CLAUDE_AGENT), None);
+        state.apply(fresh, &thread("sess_2"), 4);
+        let current = state.thread.as_ref().unwrap();
+        assert_eq!(current.first_run, fresh);
+        assert_eq!(current.native_id.as_deref(), Some("sess_2"));
+        assert_eq!(state.other_threads.len(), 1);
+        assert_eq!(state.other_threads[0].first_run, first);
+        assert_eq!(state.other_threads[0].status, "idle");
+        assert_eq!(state.run_threads[&second], first);
+        assert_eq!(state.run_threads[&fresh], fresh);
+        // Later turns resume the fresh session, on its thread.
+        assert_eq!(
+            state.resume_for(provider::CLAUDE_AGENT).as_deref(),
+            Some("sess_2")
+        );
+    }
+
     #[test]
     fn a_switch_of_instance_opens_its_own_provider_thread_and_a_switch_back_resumes_the_first() {
         use uuid::Uuid;
