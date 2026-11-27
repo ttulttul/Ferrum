@@ -8,6 +8,7 @@ import secrets
 import shlex
 import shutil
 from tempfile import TemporaryDirectory
+from time import monotonic, sleep
 
 from websockets.sync.client import connect
 
@@ -53,6 +54,18 @@ def disk(state):
     return (state / "settings.json").read_bytes() if (state / "settings.json").exists() else b""
 
 
+def settled_disk(states, seconds=5):
+    """Each server's settings file once they agree, or as they stand after `seconds`. A save wakes
+    the server's file watcher, whose reload can write the file again (folding legacy project
+    overrides sets projectSettingsFolded), on each server in its own time after the RPC replied."""
+    deadline = monotonic() + seconds
+    while True:
+        files = [disk(s) for s in states]
+        if files[0] == files[1] or monotonic() > deadline:
+            return files
+        sleep(0.05)
+
+
 def secret_files(state):
     # Other services own independent secrets, including auth signing keys.
     prefixes = ("bitbucket-", "github-token-", "source-control-", "voice-cloud-",
@@ -81,7 +94,7 @@ def paired(commands, root, initial=None):
             reply = json.loads(packets[0])["exit"]
             if expect and reply["_tag"] != expect:
                 raise AssertionError(f"{label} unexpected {reply}")
-            identical(label + " persisted JSON", [disk(s) for s in states])
+            identical(label + " persisted JSON", settled_disk(states))
             files = [secret_files(s) for s in states]
             if files[0] != files[1]:
                 raise AssertionError(f"{label} secret files differ: {list(files[0])} / {list(files[1])}")
