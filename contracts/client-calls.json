@@ -1,5 +1,5 @@
 {
-  "reference": "pingdotgg/t3code@44a533378653164dea96435e23c8ea27efaffedb",
+  "reference": "pingdotgg/t3code@2e830d77334715a72602d907ed7d78d8cfc430d1",
   "generatedBy": "scripts/update_client_call_inventory.py",
   "calls": [
     {
@@ -881,6 +881,7 @@
       "usage": "client",
       "existingCoverage": [
         "github-voice-parity.json",
+        "github_provider_parity.py",
         "linear_provider_parity.py"
       ],
       "validationOnly": false,
@@ -5838,8 +5839,10 @@
       "stream": false,
       "auth": "session (orchestration:read)",
       "usage": "client",
-      "existingCoverage": [],
-      "validationOnly": true,
+      "existingCoverage": [
+        "workflow_rpc_parity.py"
+      ],
+      "validationOnly": false,
       "clientHarness": [],
       "knownGaps": []
     },
@@ -6068,8 +6071,10 @@
       "stream": false,
       "auth": "session (terminal:operate)",
       "usage": "client",
-      "existingCoverage": [],
-      "validationOnly": true,
+      "existingCoverage": [
+        "layout_commands_parity.py"
+      ],
+      "validationOnly": false,
       "clientHarness": [],
       "knownGaps": []
     },
@@ -6089,8 +6094,10 @@
       "stream": false,
       "auth": "session (filesystem:read)",
       "usage": "client",
-      "existingCoverage": [],
-      "validationOnly": true,
+      "existingCoverage": [
+        "layout_commands_parity.py"
+      ],
+      "validationOnly": false,
       "clientHarness": [],
       "knownGaps": []
     },
