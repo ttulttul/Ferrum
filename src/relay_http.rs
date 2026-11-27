@@ -27,8 +27,6 @@ const GRANT: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
 const JWT: &str = "urn:ietf:params:oauth:token-type:jwt";
 const ACCESS_TYPE: &str = "urn:ietf:params:oauth:token-type:access_token";
 pub fn router(service: RelayService) -> Router {
-    let webhook_enabled =
-        std::env::var("CLERK_WEBHOOK_SIGNING_SECRET").is_ok_and(|secret| !secret.trim().is_empty());
     let mut app = Router::new();
     for contract in HTTP_CONTRACTS.iter().filter(|c| c.relay) {
         let method =
@@ -43,8 +41,8 @@ pub fn router(service: RelayService) -> Router {
                       uri: Uri,
                       headers: HeaderMap,
                       body: Bytes| async move {
-                    if contract.name == "clerk" && !webhook_enabled {
-                        return StatusCode::NOT_FOUND.into_response();
+                    if contract.name == "clerk" {
+                        return s.clerk_webhook(&headers, &body).into_response();
                     }
                     let cache = matches!(
                         contract.name,

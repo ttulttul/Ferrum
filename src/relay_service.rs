@@ -9,6 +9,7 @@ use std::{
 };
 use time::OffsetDateTime;
 
+mod account_deletion;
 pub(crate) mod activity;
 pub(crate) mod links;
 pub(crate) mod tokens;
@@ -18,6 +19,7 @@ pub struct RelayService {
     db: Arc<Mutex<Connection>>,
     pub(crate) keys: Arc<tokens::Keys>,
     pub(crate) issuer: String,
+    clerk_webhook_secret: Option<Arc<str>>,
 }
 
 pub(crate) use crate::dpop_proof::hash;
@@ -38,6 +40,7 @@ impl RelayService {
         }
         let db = Connection::open(dir.join("state.sqlite3"))?;
         db.execute_batch("CREATE TABLE IF NOT EXISTS proof(key TEXT, nonce TEXT, expires INTEGER NOT NULL, PRIMARY KEY(key,nonce));
+        CREATE TABLE IF NOT EXISTS account_deletion(owner TEXT PRIMARY KEY,requested INTEGER NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,completed INTEGER);
         CREATE TABLE IF NOT EXISTS device(owner TEXT,id TEXT,data TEXT NOT NULL,updated TEXT NOT NULL, PRIMARY KEY(owner,id));
         CREATE TABLE IF NOT EXISTS activity_registration(owner TEXT,id TEXT,token TEXT NOT NULL, PRIMARY KEY(owner,id));
         CREATE TABLE IF NOT EXISTS activity(id TEXT,pubkey TEXT,thread TEXT,state TEXT NOT NULL,PRIMARY KEY(id,pubkey,thread));
@@ -59,6 +62,10 @@ impl RelayService {
         );
         Ok(Self {
             db: Arc::new(Mutex::new(db)),
+            clerk_webhook_secret: env::var("CLERK_WEBHOOK_SIGNING_SECRET")
+                .ok()
+                .filter(|secret| !secret.trim().is_empty())
+                .map(Arc::from),
             keys: Arc::new(tokens::Keys::from_env()?),
             issuer,
         })
