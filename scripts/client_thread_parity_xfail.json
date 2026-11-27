@@ -213,5 +213,8 @@
   },
   "claude delegate cancel": {
     "live": "Racy: seen both matching (every local round, and main's CI) and differing (CI on #386): the reference handles the delegate_task call that follows Claude's init on its own fiber, so on a slower runner the task's subagent (its node, record and turn item) can stream between the reference's two provider-session.updated events, before the init's provider-turn.updated and provider-thread.updated. Rust streams the init's updates, then the subagent, every time."
+  },
+  "muse crash": {
+    "live": "Racy: the reference orders the records of a Muse crash's end three ways under load, where Rust's order never changes. In 20 runs against the pinned reference under taskset -c 0-3 with four busy loops, Rust sent one sequence in all 20 (the provider thread's error, then the session's \"Provider turn failed.\" update, then the turn's error item twice); the reference sent that sequence in 3, the session update ahead of the thread's error in 15, and one error item update ahead of the session update in 2. Unloaded, 10 of 10 serial runs matched. CI: failed once on main e1fda73 (the error item order), passing on re-run."
   }
 }
