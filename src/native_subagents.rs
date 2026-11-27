@@ -63,28 +63,30 @@ fn selection(instance: &str, parent: &Value, model: Option<&str>, effort: Option
 }
 
 /// Before `parent_thread_id`'s turn records `item`: the child thread a native subagent runs on,
-/// created when it is new, or its model once Codex reported it.
+/// created when it is new, or its model once Codex reported it. What it recorded.
 pub(crate) async fn record_child(
     state: &ControlState,
     parent_thread_id: &str,
     driver: &str,
     item: &ProviderItem,
-) {
+) -> Recorded {
     // What a subagent's own turn reports belongs to its child thread.
     if let Some(native) = item.fields.get("subagentThread").and_then(Value::as_str) {
-        return record_child_turn(state, parent_thread_id, driver, native, item).await;
+        record_child_turn(state, parent_thread_id, driver, native, item).await;
+        return Recorded::Other;
     }
     if item.fields.contains_key("claudeTaskId") || item.fields.contains_key("subagentChild") {
-        return record_claude(state, parent_thread_id, driver, item).await;
+        record_claude(state, parent_thread_id, driver, item).await;
+        return Recorded::Other;
     }
     let Some(subagent) = subagent(item) else {
-        return;
+        return Recorded::Other;
     };
     let at = crate::auth_service::iso(crate::auth_service::now());
-    let event = {
+    let (event, selected) = {
         let store = state.store.read().await;
         let Some(parent) = store.threads.get(parent_thread_id) else {
-            return;
+            return Recorded::Other;
         };
         let parent_row = parent.stored_row();
         let instance = parent_row["providerInstanceId"]
@@ -95,17 +97,18 @@ pub(crate) async fn record_child(
         if let Some(child) = store.threads.get(subagent.child_id) {
             // Codex reported the child's model after the child was made.
             let Some(model) = subagent.model else {
-                return;
+                return Recorded::Other;
             };
             let current = &child.stored_row()["modelSelection"];
             let selected = selection(&instance, current, Some(model), subagent.effort);
             if *current == selected {
-                return;
+                return Recorded::Other;
             }
-            Event::ThreadPatched {
+            let patch = Event::ThreadPatched {
                 thread_id: subagent.child_id.to_owned(),
                 patch: json!({"row": {"modelSelection": selected, "updatedAt": at}}),
-            }
+            };
+            (patch, Recorded::Selection)
         } else {
             let ordinal = store
                 .threads
@@ -127,12 +130,29 @@ pub(crate) async fn record_child(
             let child = child_thread(
                 parent, &subagent, item, driver, &instance, &title, prompt, &at,
             );
-            Event::ThreadCreated(child)
+            (Event::ThreadCreated(child), Recorded::Other)
         }
     };
     if let Err(error) = state.commit(event).await {
         tracing::warn!(%error, parent_thread_id, "failed to record a native subagent's thread");
+        return Recorded::Other;
     }
+    selected
+}
+
+/// Whether `item` is what a subagent's own turn reported, which [`record_child`] records on
+/// its child thread.
+pub(crate) fn child_turn(item: &ProviderItem) -> bool {
+    item.fields.contains_key("subagentThread")
+}
+
+/// What [`record_child`] recorded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Recorded {
+    /// The child's model, once Codex reported it (`updateSubagentSelection`).
+    Selection,
+    /// Anything else, or nothing.
+    Other,
 }
 
 /// `IdAllocator.derive.subagentThread`.

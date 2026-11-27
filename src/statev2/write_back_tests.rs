@@ -1117,3 +1117,81 @@ async fn commit_cost_of_deltas_on_a_long_thread() {
         );
     }
 }
+
+/// How long a turn's snapshots hold the store on a long thread (about 5 MB),
+/// committed one at a time and as the snapshot worker's atomic batches
+/// (`commit_batch`, at most `turn::ATOMIC_BATCH` at once): every reader of
+/// the store (`thread_list`, a snapshot) waits up to that long. Run with
+/// `cargo test --release --lib batch_lock_hold -- --ignored --nocapture`.
+#[tokio::test(flavor = "current_thread")]
+#[ignore]
+async fn batch_lock_hold_on_a_long_thread() {
+    let (home, conn, id) = super::lazy_tests::seeded_large(12, 2000, 2048);
+    let host = host(home.path(), &conn);
+    let _live = host.control.events.subscribe();
+    let _shell = host.control.shell_events.subscribe();
+    dispatch(
+        &host,
+        json!({"type": "message.dispatch", "commandId": "c:bench", "threadId": id, "messageId": "message:bench",
+        "text": "Run tools", "attachments": [], "createdBy": "user", "creationSource": "web"}),
+    )
+    .await;
+    let run = host.store_now().threads[&id].runs.last().unwrap().id;
+    let size = crate::wire_json::compact(&host.store_now().threads[&id].projection()).len();
+    let snapshot = |name: String| crate::Event::RunProvider {
+        visible_text: None,
+        run_id: run,
+        thread_id: id.clone(),
+        event: crate::workspace::ProviderEvent::TurnItem {
+            item: crate::workspace::provider::ProviderItem::new(
+                name,
+                "command_execution",
+                "running",
+            )
+            .with("command", "ls"),
+        },
+        position: None,
+    };
+    let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
+    let batch: usize = std::env::var("T3CODE_BATCH")
+        .ok()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(crate::turn::ATOMIC_BATCH);
+    let (mut single, mut batched) = (Vec::new(), Vec::new());
+    for round in 0..10 {
+        for n in 0..batch {
+            let started = std::time::Instant::now();
+            host.commit(snapshot(format!("one-{round}-{n}")))
+                .await
+                .unwrap();
+            single.push(started.elapsed());
+        }
+        let events = (0..batch)
+            .map(|n| (snapshot(format!("batch-{round}-{n}")), Vec::new()))
+            .collect();
+        let started = std::time::Instant::now();
+        let results = host.control.commit_batch(events).await;
+        batched.push(started.elapsed());
+        assert!(results.iter().all(Result::is_ok));
+    }
+    single.sort();
+    batched.sort();
+    eprintln!(
+        "thread {:.1} MB; store held per snapshot alone: median {:.2} ms, max {:.2} ms; \
+         per batch of {batch}: median {:.2} ms, max {:.2} ms",
+        size as f64 / 1e6,
+        ms(single[single.len() / 2]),
+        ms(*single.last().unwrap()),
+        ms(batched[batched.len() / 2]),
+        ms(*batched.last().unwrap()),
+    );
+    host.commit(crate::Event::RunFinished {
+        run_id: run,
+        thread_id: id.clone(),
+        status: "completed".into(),
+        error: None,
+    })
+    .await
+    .unwrap();
+    store_matches_database(&host, &conn, &id);
+}

@@ -577,12 +577,19 @@ const SNAPSHOT_WINDOW: Duration = Duration::from_millis(20);
 const ACP_READ_WINDOW: Duration = Duration::from_millis(20);
 /// The most snapshots one batch takes (`MAX_EVENTS`).
 const SNAPSHOT_BATCH: usize = 64;
+/// The most snapshots committed under one hold of the store
+/// ([`crate::control_state::ControlState::commit_batch`]): about what one read
+/// of a provider's output holds, so readers of the store never wait long.
+pub(crate) const ATOMIC_BATCH: usize = 4;
 
 /// A turn's item and plan snapshots as the reference's `ProviderCommitBatch`
-/// commits a provider stream's: an idle worker takes a snapshot at once and
-/// is busy committing it for [`SNAPSHOT_WINDOW`]; snapshots that arrive
-/// meanwhile queue and commit together when it is done, and within such a
-/// batch a snapshot a later one of the same entity replaces is not sent live
+/// commits a provider stream's: an idle worker takes a snapshot at once
+/// (a native subagent's with the snapshots read with it), commits them with
+/// no other commit between them (`commit_batch`, [`ATOMIC_BATCH`] at a time)
+/// and is busy for
+/// [`SNAPSHOT_WINDOW`]; snapshots that arrive meanwhile queue and commit
+/// together when it is done, and within such a batch a snapshot a later one
+/// of the same entity replaces is not sent live
 /// ([`crate::control_state::coalesce`]). Anything else the turn reports
 /// waits for the queue, after which the worker is idle again.
 ///
@@ -597,6 +604,15 @@ struct Snapshots {
     flush_at: Option<crate::runtime::Wait>,
     /// The turn's terminal was seen: snapshots commit one at a time.
     terminal_seen: bool,
+    /// An idle worker is taking what was read with its first snapshot
+    /// (`push`), to commit as one batch.
+    taking: bool,
+    /// A subagent's own turn was reported while taking it.
+    child_turn_taken: bool,
+    /// What a subagent's own turn reported while taking: recorded on its
+    /// child thread (`record_child`) once the batch is, which records the
+    /// child's provider thread on the parent it copies.
+    child_frames: Vec<crate::workspace::provider::ProviderItem>,
     /// An ACP agent's turn: the reference's worker takes a snapshot only
     /// once the ACP stream has handed over what it read with it, so an idle
     /// worker waits [`ACP_READ_WINDOW`] before committing, and snapshots
@@ -710,24 +726,62 @@ impl Snapshots {
                 )))
     }
 
-    /// A snapshot arrived: an idle worker commits it at once and, if it sent
-    /// anything live, is busy for [`SNAPSHOT_WINDOW`]; a busy one queues it.
+    /// A snapshot arrived: an idle worker commits it at once, or, for a native
+    /// subagent's read with more, takes it with what was read with it and
+    /// commits them (`tick`); then, if they sent anything live, it is busy
+    /// for [`SNAPSHOT_WINDOW`]. A busy one queues it.
     async fn push<H: TurnHost>(
         &mut self,
         host: &H,
         run: &Run,
         event: Event,
         position: Option<StreamPosition>,
+        read_with_more: bool,
     ) {
+        // Only a native subagent's snapshot starts a batch of what was read
+        // with it: a client acts on seeing one (a stop), and coalescing any
+        // other read costs a dry run of the thread for nothing a client does.
+        let takes = read_with_more
+            && matches!(&event, Event::RunProvider {
+                event: ProviderEvent::TurnItem { item },
+                ..
+            } if native_subagent(item));
         self.queued.push((event, position));
         if self.flush_at.is_none() && self.reads_first {
             self.flush_at = Some(host.turn_wait(ACP_READ_WINDOW));
+        } else if self.flush_at.is_none() && takes {
+            // An idle worker takes the snapshot with everything already read
+            // with it (the turn takes waiting events before this timer), and
+            // commits them as one batch (`tick`), as the reference's worker
+            // takes its whole queue: a client that sees the first sees the
+            // rest before it can act.
+            self.flush_at = Some(host.turn_wait(Duration::ZERO));
+            self.taking = true;
+            self.child_turn_taken = false;
         } else if self.flush_at.is_none() {
-            if self.commit(host, run).await {
-                self.flush_at = Some(host.turn_wait(SNAPSHOT_WINDOW));
-            }
+            // Read alone: committed at once.
+            self.tick(host, run).await;
         } else if self.queued.len() >= SNAPSHOT_BATCH {
             self.commit(host, run).await;
+        }
+    }
+
+    /// A native subagent's child was recorded (`record_child`) while an
+    /// idle worker takes what was read. The reference reads a subagent's
+    /// model after recording the child's turn start, so a model reported
+    /// after the child's turn started was read too late for the batch being
+    /// taken, which is then done; one reported before joins it.
+    async fn child_recorded<H: TurnHost>(
+        &mut self,
+        host: &H,
+        run: &Run,
+        recorded: crate::native_subagents::Recorded,
+    ) {
+        if recorded == crate::native_subagents::Recorded::Selection
+            && self.taking
+            && self.child_turn_taken
+        {
+            self.tick(host, run).await;
         }
     }
 
@@ -760,30 +814,60 @@ impl Snapshots {
     /// later one replaces, acknowledging each once it is recorded. Whether
     /// any of them sent something live.
     async fn commit<H: TurnHost>(&mut self, host: &H, run: &Run) -> bool {
+        // What was taken with a snapshot is not coalesced: the reference's
+        // idle worker commits that snapshot alone, and the next batch follows
+        // before anything else commits.
+        let coalesce = !std::mem::take(&mut self.taking);
+        let sent = self.commit_queued(host, run, coalesce).await;
+        for item in std::mem::take(&mut self.child_frames) {
+            crate::native_subagents::record_child(
+                host,
+                &run.thread_id,
+                run.driver.as_deref().unwrap_or("codex"),
+                &item,
+            )
+            .await;
+        }
+        sent
+    }
+
+    /// The queued snapshots' part of [`Snapshots::commit`].
+    async fn commit_queued<H: TurnHost>(&mut self, host: &H, run: &Run, coalesce: bool) -> bool {
         let queued = std::mem::take(&mut self.queued);
         if queued.is_empty() {
             return false;
         }
         let events: Vec<Event> = queued.iter().map(|(event, _)| event.clone()).collect();
-        let suppress = if events.len() > 1 {
+        let suppress = if coalesce && events.len() > 1 {
             superseded_snapshots(&events, host.dry_run(&events).await)
         } else {
-            vec![Vec::new()]
+            vec![Vec::new(); events.len()]
         };
         let mut sent = false;
-        for ((event, position), suppress) in queued.into_iter().zip(suppress) {
+        let mut queued = queued.into_iter().zip(suppress).peekable();
+        while queued.peek().is_some() {
             if host.stopping() {
                 return sent;
             }
-            // Not acknowledged when it could not be recorded: the workspace
-            // offers it again after a reconnect.
-            let Ok(record) = host.commit_suppressing(event, suppress).await else {
-                return sent;
-            };
-            sent |= sent_live(&record);
-            host.turn_recorded(run, position);
-            if let Some(position) = position {
-                host.workspace().ack(position);
+            // In order, a few at a time, each batch with no other commit
+            // between its events (`commit_batch`).
+            let chunk: Vec<_> = queued.by_ref().take(ATOMIC_BATCH).collect();
+            let (events, positions): (Vec<_>, Vec<_>) = chunk
+                .into_iter()
+                .map(|((event, position), suppress)| ((event, suppress), position))
+                .unzip();
+            let results = host.commit_batch(events).await;
+            for (result, position) in results.into_iter().zip(positions) {
+                // Not acknowledged when it could not be recorded: the
+                // workspace offers it again after a reconnect.
+                let Ok(record) = result else {
+                    return sent;
+                };
+                sent |= sent_live(&record);
+                host.turn_recorded(run, position);
+                if let Some(position) = position {
+                    host.workspace().ack(position);
+                }
             }
         }
         sent
@@ -965,13 +1049,19 @@ async fn record<H: TurnHost>(
         };
         // A native subagent's child thread exists before its parent reports it.
         if let TurnEvent::Provider(ProviderEvent::TurnItem { item }) = &event {
-            crate::native_subagents::record_child(
-                host,
-                &run.thread_id,
-                run.driver.as_deref().unwrap_or("codex"),
-                item,
-            )
-            .await;
+            if snapshots.taking && crate::native_subagents::child_turn(item) {
+                snapshots.child_turn_taken = true;
+                snapshots.child_frames.push(item.clone());
+            } else {
+                let recorded = crate::native_subagents::record_child(
+                    host,
+                    &run.thread_id,
+                    run.driver.as_deref().unwrap_or("codex"),
+                    item,
+                )
+                .await;
+                snapshots.child_recorded(host, run, recorded).await;
+            }
         }
         let visible_text = match &event {
             TurnEvent::Provider(ProviderEvent::TurnItem { item }) => {
@@ -1097,7 +1187,9 @@ async fn record<H: TurnHost>(
         }
         match recorded(run, event, position, visible_text) {
             Recorded::Event(event) if snapshot => {
-                snapshots.push(host, run, *event, position).await;
+                snapshots
+                    .push(host, run, *event, position, turn.has_waiting())
+                    .await;
             }
             Recorded::Event(event) => {
                 // An event that could not be recorded is not acknowledged,

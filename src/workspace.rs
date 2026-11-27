@@ -138,6 +138,13 @@ impl TurnItems {
     pub fn stream(&self) -> Option<u64> {
         self.stream
     }
+    /// Whether more events were read and wait to be taken.
+    pub fn has_waiting(&self) -> bool {
+        match &self.source {
+            TurnItemSource::Plain(events) => !events.is_empty(),
+            TurnItemSource::Tracked(items) => !items.is_empty(),
+        }
+    }
     /// The next event, or `None` once the turn's events are done.
     pub async fn recv(&mut self) -> Option<TurnItem> {
         match &mut self.source {
