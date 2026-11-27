@@ -117,7 +117,7 @@
     "live": "Ferrum can publish an additional running reasoning item. The reference can also publish the ready session before the final assistant message."
   },
   "opencode2 interrupt": {
-    "live": "Ferrum publishes a running assistant message and item that the reference can combine with their completed snapshots."
+    "live": "Racy: matched in 1 of 10 pinned local runs and in the CI run on #384. In the nine differing runs the reference reported the session ready before the interrupted tool node and command item. Ferrum reported it after both."
   },
   "opencode2 approval": {
     "live": "The reference reports the session waiting while the request is open and running again when answered. Ferrum also publishes intermediate assistant text that the reference can combine with its completed snapshot."
