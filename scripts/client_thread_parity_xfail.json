@@ -221,10 +221,10 @@
     "live content": "The reference also streams the wake message's message.updated, which Rust does not (as its live entry says)."
   },
   "codex native subagent stop": {
-    "live": "Every update of the subagent now streams with its turn item, as the reference writes them, but the stop races the child's first frames: the reference commits the child's turn start within a millisecond of the spawn, before the interrupt card, while Rust commits it about 100 ms later, after the card. The same updates stream on both sides, one of them on the other side of run_interrupt_request."
+    "live": "Racy: seen both matching and differing (matched in every pinned local run, 30 and more; differed in 1 of 2 shard runs): Rust commits the parent's subagent snapshots read together in one batch before the stop's card, and the child's model after it, as the reference does when unloaded; under a shard's load the reference once also committed the child's model (subagent.updated) before the card."
   },
   "codex native subagent late stop": {
-    "live": "Around the stop: the child's model, read from Codex, streams as a record alone on both sides (updateSubagentSelection), but before the interrupt card in the reference and after it in Rust, which reads it later; and at the late child turn's stop the reference writes the interrupted subagent's record before its node, Rust after. The subagent's record, item and node and the turn match."
+    "live": "At the late child turn's stop the reference writes the interrupted subagent's record before its node, Rust after. The subagent's record, item and node, the turn, and the order around the interrupt card match."
   },
   "claude native subagent background": {
     "live": "Racy: seen both matching (3 of 6 unpinned and 3 of 8 pinned local rounds) and differing (the others). Rust now records the background child's answer while Claude is idle, as it arrives, with its turn item held for the thread's next provider event as the reference's provider commit batch holds an idle stream's snapshots. The reference itself places these updates by timing: seen with the turn item held, with it streamed at once, and with nothing streamed before the wake run is created (under load), and its wake run's own updates land before or after the run starts."
