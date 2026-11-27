@@ -88,6 +88,12 @@ pub struct SupersededAttempt {
     pub record: RunRecord,
     pub terminal: Option<Terminal>,
     pub at: u64,
+    /// The message the attempt after it runs.
+    pub next_message_id: String,
+    /// Its turn has not ended yet: what the run's provider reports until
+    /// it does is its, as the reference keeps an interrupted turn's last
+    /// events on its own attempt.
+    pub open: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -219,8 +225,55 @@ pub struct PlanRecord {
 }
 
 impl ProviderState {
-    /// Apply `run`'s provider `event`, recorded at `at` (milliseconds).
+    /// Apply `run`'s provider `event`, recorded at `at` (milliseconds): to
+    /// the attempt a steering restart replaced while its turn is still
+    /// ending, else to the run's current attempt.
     pub(crate) fn apply(&mut self, run: Uuid, event: &ProviderEvent, at: u64) {
+        let open = self
+            .superseded
+            .get(&run)
+            .and_then(|attempts| attempts.last())
+            .is_some_and(|attempt| attempt.open);
+        if !open {
+            return self.apply_current(run, event, at);
+        }
+        let Some(mut attempt) = self.superseded.get_mut(&run).and_then(Vec::pop) else {
+            return;
+        };
+        let current = self.runs.insert(run, attempt.record);
+        let current_terminal = match attempt.terminal.take() {
+            Some(terminal) => self.terminals.insert(run, terminal),
+            None => self.terminals.remove(&run),
+        };
+        let before = self
+            .thread
+            .as_ref()
+            .map(|thread| (thread.status, thread.updated_at));
+        self.apply_current(run, event, at);
+        // Its turn's end leaves the provider thread as it was: the run goes
+        // on, and the next attempt's start reports it.
+        if matches!(event, ProviderEvent::TurnTerminal { .. }) {
+            if let (Some(thread), Some((status, updated_at))) = (self.thread.as_mut(), before) {
+                thread.status = status;
+                thread.updated_at = updated_at;
+            }
+        }
+        let record = self.runs.remove(&run);
+        attempt.terminal = self.terminals.remove(&run);
+        if let Some(current) = current {
+            self.runs.insert(run, current);
+        }
+        if let Some(terminal) = current_terminal {
+            self.terminals.insert(run, terminal);
+        }
+        if let Some(record) = record {
+            attempt.record = record;
+            attempt.open = !matches!(event, ProviderEvent::TurnTerminal { .. });
+            self.superseded.entry(run).or_default().push(attempt);
+        }
+    }
+
+    fn apply_current(&mut self, run: Uuid, event: &ProviderEvent, at: u64) {
         if let ProviderEvent::SessionStartup { phase } = event {
             self.session_startup = Some((phase.clone(), at));
             return;

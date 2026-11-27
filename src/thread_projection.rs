@@ -403,6 +403,15 @@ impl Thread {
                 if self.checkpoints.iter().any(|c| c.turn_count == turn_count) {
                     out["checkpointId"] = json!(checkpoint_id(&self.id, turn_count));
                 }
+                // A steering restart's message is what the run runs now.
+                if let Some(attempt) = self
+                    .provider
+                    .superseded
+                    .get(&run.id)
+                    .and_then(|attempts| attempts.last())
+                {
+                    out["userMessageId"] = json!(attempt.next_message_id);
+                }
                 if let Some(ids) = self.provider_run_ids(run) {
                     out["providerThreadId"] = json!(ids.provider_thread);
                     out["rootNodeId"] = json!(ids.root_node);
@@ -738,7 +747,13 @@ impl Thread {
                     .or_else(|| self.starting_run_ids(started))
                     .filter(|ids| !ids.provider_thread.is_empty())
                 {
-                    item["nodeId"] = json!(ids.root_node);
+                    // On its first attempt's, after a steering restart.
+                    let root = if started.steering_restarts > 0 {
+                        crate::provider_projection::attempt_ids(&started.wire_id(), 1).1
+                    } else {
+                        ids.root_node
+                    };
+                    item["nodeId"] = json!(root);
                     item["providerThreadId"] = json!(ids.provider_thread);
                 }
             }
