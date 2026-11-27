@@ -13,6 +13,9 @@
     "peer calls": "Racy: seen both matching and differing: when its wait there ends, a server's follower reads the thread's reply only if the cancel has not recorded the task's result yet (the reference races the wait with the task's result, `raceFirst(endedHere)`), so either server may skip that one t3_thread_read.",
     "live": "#39502 (ProviderCommitBatch) combines queued snapshots, as in claude delegate live: the reference sends the steered delivery's card once with its message, where Rust also sends its pending and completed updates (two more turn-item.updated notification); Rust starts the run that answers it after the first turn's checkpoint is captured, where the reference's starts just before. The items, messages, runs and the answer's run match."
   },
+  "claude delegate remote stop": {
+    "live": "The task's follower stops its thread there and records that (stoppedThere) in about the same time on both sides, but Rust captures the stopped run's checkpoint sooner, so that subagent.updated streams after the checkpoint and the run's end rather than before them (all 8 pinned local rounds). The task's interrupted result, the stop through the link and the thread match."
+  },
   "claude delegate followup": {
     "live": "Racy: the provider commit batch (#39502) decides by timing whether the first task's queued subagent updates commit together, and both sides vary: main's CI run 45294158798 saw the reference send one more subagent.updated after the task's context-transfer.created, and one of 8 pinned local rounds saw Rust send one more there. Matched in the other runs.",
     "orchestration.subscribeThread (live turn)": "Racy: the reference's live turn sometimes does not settle before the harness stops waiting (the reference goes silent; Rust answers), seen both matching and differing, on main too.",

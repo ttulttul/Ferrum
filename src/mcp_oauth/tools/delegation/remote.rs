@@ -794,10 +794,36 @@ async fn follow_once<S: McpHost>(
     if let Some(run) = remote.get("runId").filter(|r| r.is_string()) {
         wait["runId"] = run.clone();
     }
-    let waited = follow
-        .call(host, environment, "t3_thread_wait", wait)
-        .await
-        .map_err(fail)?;
+    // The wait gives way once the task ends here (a cancel, or its parent's Stop), so the next
+    // look stops it there straight away (`endedHere`).
+    let wait_there = std::pin::pin!(follow.call(host, environment, "t3_thread_wait", wait));
+    let mut events = host.control_state().events.subscribe();
+    let ended_here = std::pin::pin!(async {
+        loop {
+            if read_task_row(host, parent_id, task_id)
+                .await
+                .is_none_or(|t| !t["result"].is_null())
+            {
+                return;
+            }
+            // The parent's next change, or a check now and then should the feed lag.
+            let timer = host.sleep(Duration::from_secs(5));
+            tokio::pin!(timer);
+            loop {
+                tokio::select! {
+                    _ = &mut timer => break,
+                    event = events.recv() => match event {
+                        Ok(event) if event.event.thread_id() != Some(parent_id) => continue,
+                        _ => break,
+                    }
+                }
+            }
+        }
+    });
+    let waited = match futures_util::future::select(wait_there, ended_here).await {
+        futures_util::future::Either::Left((waited, _)) => waited.map_err(fail)?,
+        futures_util::future::Either::Right(_) => return Ok(false),
+    };
     // A cancel or Stop recorded here meanwhile: the next look reads the result and stops it
     // there. One still being recorded wins the result after this reads the reply.
     if read_task_row(host, parent_id, task_id)
