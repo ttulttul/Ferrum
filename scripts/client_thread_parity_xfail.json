@@ -89,6 +89,12 @@
   "pi stop then resume": {
     "live": "The reference's Pi adapter reports its provider session's own transitions (provider-session.updated to running at a turn's start, and to ready, error or stopped at its end), which Rust's session record does not keep; it reports the provider turn, then its thread, at the start (Rust: the thread first); it sends an assistant message's turn item before its message.updated (Rust: the message first); and where its live usage updates (provider-turn.updated) land among the stream's other events depends on timing."
   },
+  "opencode turn": {
+    "live": "Racy: matched in 15 of 15 pinned local runs on main (12 ordinary and 3 on one CPU). In both CI attempts on #380 the reference sent an extra message.updated and assistant turn-item.updated pair immediately after the first assistant item. Ferrum sent the sequence seen in the local runs."
+  },
+  "opencode second turn": {
+    "live": "Racy: matched in 13 of 15 pinned local runs on main (12 of 12 ordinary and 1 of 3 on one CPU). In the other two, the reference reported the running session before the running turn. In CI it also repeated the assistant message and item after the first assistant item (#382), or the reasoning item, assistant message and item before the session became ready (#384)."
+  },
   "opencode approval": {
     "live": "The reference reports the session waiting for permission and running when OpenCode confirms the reply. It also publishes the resolved request and approval item on that confirmation."
   },
@@ -111,7 +117,7 @@
     "live": "Ferrum can publish an additional running reasoning item. The reference can also publish the ready session before the final assistant message."
   },
   "opencode2 interrupt": {
-    "live": "Ferrum publishes a running assistant message and item that the reference can combine with their completed snapshots."
+    "live": "Racy: matched in 1 of 10 pinned local runs and in the CI run on #384. In the nine differing runs the reference reported the session ready before the interrupted tool node and command item. Ferrum reported it after both."
   },
   "opencode2 approval": {
     "live": "The reference reports the session waiting while the request is open and running again when answered. Ferrum also publishes intermediate assistant text that the reference can combine with its completed snapshot."
@@ -126,7 +132,7 @@
     "live": "The reference reports the session waiting while the request is open and running again when answered. Ferrum also publishes intermediate assistant text that the reference can combine with its completed snapshot."
   },
   "opencode2 steer": {
-    "live": "Ferrum publishes a running assistant message and item that the reference can combine with their completed snapshots."
+    "live": "In all 10 pinned runs the reference reported the session ready before the final assistant node, message and turn item. Ferrum reported it after those three updates."
   },
   "opencode2 failed turn": {
     "live": "The reference can publish the ready session between turn admission and the active-thread report. Ferrum publishes it with the failed turn."
@@ -151,36 +157,6 @@
   },
   "codex native subagent": {
     "live": "The reference streams every update of the subagent, also those that change nothing (running again when the child's turn starts, its result and completion once more for each report Codex sends), and the subagent node's completion when the child's turn ends; Rust's stream is made of what changed in the thread, so it sends each change once. The subagent's records, items and nodes, and the child thread with its turn, match the reference."
-  },
-  "fx turn": {
-    "live": "Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter (in fx's flavor) reports it just after (Rust's turn records hang from the thread record, which the thread's update creates). And the reference's provider commit batch (#39502) takes fx's first snapshots together (its worker runs only once the ACP stream has handed over what it read), so it sends the assistant message items once, completed, where Rust, whose batch commits the first snapshot at once, also sends their running updates."
-  },
-  "fx second turn": {
-    "live": "Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter (in fx's flavor) reports it just after (Rust's turn records hang from the thread record, which the thread's update creates). And the reference's provider commit batch (#39502) takes fx's first snapshots together (its worker runs only once the ACP stream has handed over what it read), so it sends the assistant message items once, completed, where Rust, whose batch commits the first snapshot at once, also sends their running updates."
-  },
-  "fx default model": {
-    "live": "Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter (in fx's flavor) reports it just after (Rust's turn records hang from the thread record, which the thread's update creates). And the reference's provider commit batch (#39502) takes fx's first snapshots together (its worker runs only once the ACP stream has handed over what it read), so it sends the assistant message items once, completed, where Rust, whose batch commits the first snapshot at once, also sends their running updates."
-  },
-  "fx model and effort": {
-    "live": "Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter (in fx's flavor) reports it just after (Rust's turn records hang from the thread record, which the thread's update creates). And the reference's provider commit batch (#39502) takes fx's first snapshots together (its worker runs only once the ACP stream has handed over what it read), so it sends the assistant message items once, completed, where Rust, whose batch commits the first snapshot at once, also sends their running updates."
-  },
-  "fx full access": {
-    "live": "Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter (in fx's flavor) reports it just after (Rust's turn records hang from the thread record, which the thread's update creates). And the reference's provider commit batch (#39502) takes fx's first snapshots together (its worker runs only once the ACP stream has handed over what it read), so it sends the assistant message items once, completed, where Rust, whose batch commits the first snapshot at once, also sends their running updates."
-  },
-  "fx approval": {
-    "live": "Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter (in fx's flavor) reports it just after (Rust's turn records hang from the thread record, which the thread's update creates). And the reference's provider commit batch (#39502) takes fx's first snapshots together (its worker runs only once the ACP stream has handed over what it read), so it sends the assistant message items once, completed, where Rust, whose batch commits the first snapshot at once, also sends their running updates. During an approval the reference sends the permission's runtime-request.updated before its turn item and commits the file change's updates after the request's records, where Rust sends the file change's node update first."
-  },
-  "fx approval declined": {
-    "live": "Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter (in fx's flavor) reports it just after (Rust's turn records hang from the thread record, which the thread's update creates). And the reference's provider commit batch (#39502) takes fx's first snapshots together (its worker runs only once the ACP stream has handed over what it read), so it sends the assistant message items once, completed, where Rust, whose batch commits the first snapshot at once, also sends their running updates. During an approval the reference sends the permission's runtime-request.updated before its turn item and commits the file change's updates after the request's records, where Rust sends the file change's node update first."
-  },
-  "fx approval for session": {
-    "live": "Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter (in fx's flavor) reports it just after (Rust's turn records hang from the thread record, which the thread's update creates). And the reference's provider commit batch (#39502) takes fx's first snapshots together (its worker runs only once the ACP stream has handed over what it read), so it sends the assistant message items once, completed, where Rust, whose batch commits the first snapshot at once, also sends their running updates. During an approval the reference sends the permission's runtime-request.updated before its turn item and commits the file change's updates after the request's records, where Rust sends the file change's node update first."
-  },
-  "fx auto": {
-    "live": "Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter (in fx's flavor) reports it just after (Rust's turn records hang from the thread record, which the thread's update creates). And the reference's provider commit batch (#39502) takes fx's first snapshots together (its worker runs only once the ACP stream has handed over what it read), so it sends the assistant message items once, completed, where Rust, whose batch commits the first snapshot at once, also sends their running updates. During an approval the reference sends the permission's runtime-request.updated before its turn item and commits the file change's updates after the request's records, where Rust sends the file change's node update first."
-  },
-  "fx interrupt": {
-    "live": "Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter (in fx's flavor) reports it just after (Rust's turn records hang from the thread record, which the thread's update creates). And the reference's provider commit batch (#39502) takes fx's first snapshots together (its worker runs only once the ACP stream has handed over what it read), so it sends the assistant message items once, completed, where Rust, whose batch commits the first snapshot at once, also sends their running updates. After the Stop the reference sends the interrupted reply's last assistant message update after fx's provider thread updates (its title and context usage), where Rust has already sent it."
   },
   "codex native subagent activity": {
     "live": "The reference streams every update of the subagent, also those that change nothing (running again when the child's turn starts, its result and completion once more for each report Codex sends), and the subagent node's completion when the child's turn ends; Rust's stream is made of what changed in the thread, so it sends each change once. The subagent's records, items and nodes, and the child thread with its turn, match the reference."
@@ -240,15 +216,6 @@
   },
   "codex native subagent stop": {
     "live": "The reference streams every update of the subagent, also those that change nothing (running again just before the interrupt's card), and the subagent node's interruption with the turn's end; Rust's stream is made of what changed in the thread, so it sends each change once and the node's status with the subagent's record. The parent's interrupted run and subagent, and the child thread with its interrupted command and turn, match the reference."
-  },
-  "codex restart running": {
-    "attempts": "A restart of a running Codex turn runs in place on the reference: Codex can restart a turn with new input (supportsSteeringByInterruptRestart), so the run keeps going as its next attempt (reason steering_restart), its first attempt superseded and that attempt's root node interrupted, and the restart message joins the same run. Rust's runs have one attempt each, so it stops the run (interrupt items and a checkpoint) and runs the message as a run of its own, as it does for Claude.",
-    "items": "A restart of a running Codex turn runs in place on the reference: Codex can restart a turn with new input (supportsSteeringByInterruptRestart), so the run keeps going as its next attempt (reason steering_restart), its first attempt superseded and that attempt's root node interrupted, and the restart message joins the same run. Rust's runs have one attempt each, so it stops the run (interrupt items and a checkpoint) and runs the message as a run of its own, as it does for Claude.",
-    "runs": "A restart of a running Codex turn runs in place on the reference: Codex can restart a turn with new input (supportsSteeringByInterruptRestart), so the run keeps going as its next attempt (reason steering_restart), its first attempt superseded and that attempt's root node interrupted, and the restart message joins the same run. Rust's runs have one attempt each, so it stops the run (interrupt items and a checkpoint) and runs the message as a run of its own, as it does for Claude.",
-    "shape": "A restart of a running Codex turn runs in place on the reference: Codex can restart a turn with new input (supportsSteeringByInterruptRestart), so the run keeps going as its next attempt (reason steering_restart), its first attempt superseded and that attempt's root node interrupted, and the restart message joins the same run. Rust's runs have one attempt each, so it stops the run (interrupt items and a checkpoint) and runs the message as a run of its own, as it does for Claude. Rust's second run's message also carries followsThreadSelection.",
-    "live": "A restart of a running Codex turn runs in place on the reference: Codex can restart a turn with new input (supportsSteeringByInterruptRestart), so the run keeps going as its next attempt (reason steering_restart), its first attempt superseded and that attempt's root node interrupted, and the restart message joins the same run. Rust's runs have one attempt each, so it stops the run (interrupt items and a checkpoint) and runs the message as a run of its own, as it does for Claude.",
-    "live kinds": "A restart of a running Codex turn runs in place on the reference: Codex can restart a turn with new input (supportsSteeringByInterruptRestart), so the run keeps going as its next attempt (reason steering_restart), its first attempt superseded and that attempt's root node interrupted, and the restart message joins the same run. Rust's runs have one attempt each, so it stops the run (interrupt items and a checkpoint) and runs the message as a run of its own, as it does for Claude.",
-    "stopped checkpoints": "A restart of a running Codex turn runs in place on the reference: Codex can restart a turn with new input (supportsSteeringByInterruptRestart), so the run keeps going as its next attempt (reason steering_restart), its first attempt superseded and that attempt's root node interrupted, and the restart message joins the same run. Rust's runs have one attempt each, so it stops the run (interrupt items and a checkpoint) and runs the message as a run of its own, as it does for Claude."
   },
   "claude native subagent": {
     "live": "The reference streams every update of the subagent, also those that change nothing (running again as the child answers, completed again with the Agent call's result), and the subagent node's completion apart; Rust's stream is made of what changed in the thread, so it sends each change once and the node's status with the subagent's record. The subagent's record, item and node, the turn's usage and the child thread with its prompt, answer and result match."

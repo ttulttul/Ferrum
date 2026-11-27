@@ -381,6 +381,9 @@ pub enum Event {
         run_id: Uuid,
         thread_id: String,
         event: crate::workspace::ProviderEvent,
+        /// Text shown by the response streaming filter. The source event stays intact.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        visible_text: Option<String>,
         /// As [`Event::RunOutput`]'s.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         position: Option<crate::workspace::StreamPosition>,
@@ -812,13 +815,16 @@ impl Store {
                 run_id,
                 thread_id,
                 event,
+                visible_text,
                 position,
             } => {
                 if let Some(position) = position {
                     self.turn_positions.insert(*run_id, *position);
                 }
                 if let Some(thread) = self.threads.get_mut(thread_id) {
-                    thread.provider.apply(*run_id, event, at);
+                    thread
+                        .provider
+                        .apply_snapshot(*run_id, event, at, visible_text.as_deref());
                     // Startup may fail before the provider accepts the attempt.
                     if let Some(attempt) = thread.provider.runs.get_mut(run_id).filter(|attempt| {
                         attempt.native_thread_id.is_some() || attempt.turn_started
@@ -1316,6 +1322,7 @@ mod tests {
             id: at,
             at,
             event: Event::RunProvider {
+                visible_text: None,
                 run_id,
                 thread_id: "t1".into(),
                 event: crate::workspace::ProviderEvent::ProviderThread {

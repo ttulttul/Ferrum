@@ -858,8 +858,25 @@ impl crate::orchestration::CommandHost for AppState {
 }
 
 impl crate::turn::TurnHost for AppState {
+    fn turn_settings(&self) -> anyhow::Result<serde_json::Value> {
+        crate::orchestration::CommandHost::effective_settings(self)
+    }
     fn workspace(&self) -> &dyn crate::workspace::Workspace {
         &*self.workspace
+    }
+    fn restart_turn(self: Arc<Self>, run: crate::Run, cwd: String, text: String) {
+        let state = self.clone();
+        crate::runtime::Runtime::spawn(
+            &*self.runtime.clone(),
+            Box::pin(async move {
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                crate::orchestration::CommandHost::cancellations(&*state)
+                    .lock()
+                    .await
+                    .insert(run.id, tx);
+                crate::orchestration::CommandHost::launch_run(state, run, cwd, text, rx);
+            }),
+        );
     }
     fn turn_wait(&self, duration: std::time::Duration) -> crate::runtime::Wait {
         crate::runtime::Runtime::sleep(&*self.runtime, duration)

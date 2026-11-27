@@ -1054,6 +1054,7 @@ async fn commit_cost_of_deltas_on_a_long_thread() {
     let run = host.store_now().threads[&id].runs.last().unwrap().id;
     let size = crate::wire_json::compact(&host.store_now().threads[&id].projection()).len();
     let provider = |event| crate::Event::RunProvider {
+        visible_text: None,
         run_id: run,
         thread_id: id.clone(),
         event,

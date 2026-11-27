@@ -200,6 +200,10 @@ fn event(thread_id: &str, kind: &str, payload: &Value, occurred_at: &str) -> Val
 /// writes of that kind put their records in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Order {
+    /// A steering restart (`interrupt_restart`): the superseded attempt and
+    /// its interrupted root node, the run, then the new attempt and its root
+    /// node, then the rest as [`Order::Default`].
+    Restart,
     /// The thread, the run and its attempt, its root node, then each
     /// changed turn item preceded by its node and message, then provider
     /// records (a turn's progress, as the reference's ingestor writes it).
@@ -370,6 +374,7 @@ impl Order {
             | crate::Event::RunFinished { .. } => Order::End,
             crate::Event::CheckpointCaptured { .. } => Order::Checkpoint,
             crate::Event::RunStarted(_) | crate::Event::RunQueued { .. } => Order::Dispatch,
+            crate::Event::RunRestarted { .. } => Order::Restart,
             crate::Event::ThreadPatched { patch, .. } if patch["cohortStopped"] == true => {
                 Order::CohortStop
             }
@@ -409,6 +414,22 @@ impl Order {
     fn steps(self) -> &'static [Step] {
         use Step::*;
         match self {
+            Order::Restart => &[
+                RestartAttempts,
+                LooseNodes,
+                Collection("checkpointScopes"),
+                LooseMessages,
+                Items(Phase::All),
+                Collection("providerSessions"),
+                Collection("providerThreads"),
+                Collection("providerTurns"),
+                Collection("runtimeRequests"),
+                Collection("subagents"),
+                Collection("plans"),
+                Collection("checkpoints"),
+                Collection("contextHandoffs"),
+                Collection("contextTransfers"),
+            ],
             Order::Default => &[
                 Collection("runs"),
                 Collection("attempts"),
@@ -610,6 +631,9 @@ enum Step {
     /// adapter reports it again once the stream it held back while the
     /// permission callback ran comes through, changed or not.
     RequestedToolCall,
+    /// A steering restart's attempts, each with its root node, the run
+    /// between the superseded one and the new one.
+    RestartAttempts,
     /// The tool call a proposed plan came from (Claude's ExitPlanMode),
     /// reported again after its plan, as the reference's adapter reports
     /// the denied call once the plan it held is out.
@@ -1006,6 +1030,30 @@ fn diff_with_command(
     for step in steps {
         match *step {
             Step::Collection(name) => push_collection(&mut out, name),
+            Step::RestartAttempts => {
+                let attempts = &collections["attempts"];
+                let superseded = |record: &Value| record["status"] == "superseded";
+                for pass in [true, false] {
+                    if !pass {
+                        push_collection(&mut out, "runs");
+                    }
+                    for (is_new, record) in attempts.iter().filter(|(_, r)| superseded(r) == pass) {
+                        let kind = if *is_new {
+                            "run-attempt.created"
+                        } else {
+                            "run-attempt.updated"
+                        };
+                        out.push(event(thread_id, kind, record, occurred_at));
+                        if let Some(index) = nodes
+                            .iter()
+                            .position(|node| node["id"] == record["rootNodeId"])
+                        {
+                            let node = nodes.remove(index);
+                            out.push(event(thread_id, "node.updated", node, occurred_at));
+                        }
+                    }
+                }
+            }
             Step::ReportedProviderThread => {
                 // A turn whose event stream closed reported nothing more.
                 let closed = items.iter().any(|item| {
