@@ -68,15 +68,6 @@
   "claude approval-required": {
     "live": "Racy: seen both matching and differing (1 of 16 pinned local runs differed, the rest matched): during the approval, the reference sometimes leaves out the requested tool call's second command_execution turn-item.updated after the approval request's records, where Rust always sends it. It comes from the reference's provider commit batch timing around the request (#39502), before any tool call ends, so the fake CLIs' tool pacing does not cover it, nor does waiting for the stream to settle before answering or interrupting (tried)."
   },
-  "pi approval": {
-    "live": "The reference's Pi adapter reports its provider session's own transitions (provider-session.updated to running at a turn's start, and to ready, error or stopped at its end), which Rust's session record does not keep; it reports the provider turn, then its thread, at the start (Rust: the thread first); it sends an assistant message's turn item before its message.updated (Rust: the message first); and where its live usage updates (provider-turn.updated) land among the stream's other events depends on timing."
-  },
-  "pi approval declined": {
-    "live": "The reference's Pi adapter reports its provider session's own transitions (provider-session.updated to running at a turn's start, and to ready, error or stopped at its end), which Rust's session record does not keep; it reports the provider turn, then its thread, at the start (Rust: the thread first); it sends an assistant message's turn item before its message.updated (Rust: the message first); and where its live usage updates (provider-turn.updated) land among the stream's other events depends on timing."
-  },
-  "pi approval for session": {
-    "live": "The reference's Pi adapter reports its provider session's own transitions (provider-session.updated to running at a turn's start, and to ready, error or stopped at its end), which Rust's session record does not keep; it reports the provider turn, then its thread, at the start (Rust: the thread first); it sends an assistant message's turn item before its message.updated (Rust: the message first); and where its live usage updates (provider-turn.updated) land among the stream's other events depends on timing."
-  },
   "pi failed turn": {
     "live": "The reference's Pi adapter reports its provider session's own transitions (provider-session.updated to running at a turn's start, and to ready, error or stopped at its end), which Rust's session record does not keep; it reports the provider turn, then its thread, at the start (Rust: the thread first); it sends an assistant message's turn item before its message.updated (Rust: the message first); and where its live usage updates (provider-turn.updated) land among the stream's other events depends on timing."
   },
@@ -99,13 +90,13 @@
     "live": "Racy: matched in 13 of 15 pinned local runs on main (12 of 12 ordinary and 1 of 3 on one CPU). In the other two, the reference reported the running session before the running turn. In CI it also repeated the assistant message and item after the first assistant item (#382), or the reasoning item, assistant message and item before the session became ready (#384)."
   },
   "opencode approval": {
-    "live": "The reference reports the session waiting for permission and running when OpenCode confirms the reply. It also publishes the resolved request and approval item on that confirmation."
+    "live": "The reference reports the session waiting while the permission is open, running when the provider confirms the reply and ready before the final assistant item. Ferrum reports the ready session after that item."
   },
   "opencode approval declined": {
-    "live": "The reference reports the session waiting for permission and running when OpenCode confirms the reply. It also publishes the resolved request and approval item on that confirmation."
+    "live": "The reference reports the session waiting while the permission is open, running when the provider confirms the reply and ready before the final assistant item. Ferrum reports the ready session after that item."
   },
   "opencode approval for session": {
-    "live": "The reference reports the session waiting for permission and running when OpenCode confirms the reply. It also publishes the resolved request and approval item on that confirmation."
+    "live": "The reference reports the session waiting while the permission is open, running when the provider confirms the reply and ready before the final assistant item. Ferrum reports the ready session after that item."
   },
   "opencode steer": {
     "live": "Racy: matched in 14 of 16 runs against the pinned reference. The reference sometimes publishes an additional completed assistant item before its final message."

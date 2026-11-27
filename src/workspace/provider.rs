@@ -571,11 +571,13 @@ pub enum ProviderEvent {
     /// [`crate::workspace::Workspace::respond_turn`].
     #[serde(rename = "runtime_request.opened")]
     RuntimeRequestOpened { request: RuntimeRequestOpen },
-    /// The user answered a request. Recorded by the control plane when the
-    /// client answers, before the answer goes to the workspace.
+    /// The control plane records the user's answer before delivery. Some
+    /// adapters also report their own resolution after delivery.
     #[serde(rename = "runtime_request.answered", rename_all = "camelCase")]
     RuntimeRequestAnswered {
         id: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        confirmed: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         decision: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -632,6 +634,9 @@ pub struct RuntimeRequestOpen {
     /// Whether a decline may carry feedback for the agent.
     #[serde(default)]
     pub supports_feedback: bool,
+    /// The adapter reports a separate resolution after delivering the answer.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reports_resolution: bool,
     /// The request's own turn item fields: `prompt`, `reason`,
     /// `fullAccessOverride`, `appName` and `options` for an approval,
     /// `questions` for a question.

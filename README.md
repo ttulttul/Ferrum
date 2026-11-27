@@ -107,7 +107,7 @@ Parity is tested by running the original TypeScript server and the Rust server s
 | --- | --- |
 | CI parity suites | 65 suites across 13 shards on every code change (plus twice nightly); 6 more run on their own |
 | Client RPC ([cases](scripts/client_rpc_cases.json)) | 260 client steps and 18 raw RPC comparisons; 0 expected failures ([xfail](scripts/client_rpc_parity_xfail.json)) |
-| Live provider turns | 239 provider scenarios; 86 checks expected to fail, 28 of them races ([xfail](scripts/client_thread_parity_xfail.json)) |
+| Live provider turns | 240 provider scenarios; 84 checks expected to fail, 28 of them races ([xfail](scripts/client_thread_parity_xfail.json)) |
 | Shared home / server switch | 0 expected failures ([xfail](scripts/shared_store_parity_xfail.json)) |
 | Provider status ([suite](scripts/provider_status_parity.py)) | 11 scenarios lack the OpenCode 2 model catalog event subscription ([xfail](scripts/provider_status_parity_xfail.json)) |
 | Other suites | Issue detail lacks repository planning statuses, and the standalone relay lacks configured account deletion ([expected failures](scripts/parity_gaps.json)) |

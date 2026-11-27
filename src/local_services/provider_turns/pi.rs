@@ -837,6 +837,7 @@ impl<'a> Turn<'a> {
                     "command"
                 };
                 let mut open = super::requests::open(&id, &id, kind, &self.runtime_mode);
+                open.reports_resolution = true;
                 let prompt = if body.is_empty() { title.clone() } else { body };
                 open.fields.insert("prompt".into(), json!(prompt));
                 open.fields.insert("title".into(), json!(title));
@@ -884,7 +885,9 @@ impl<'a> Turn<'a> {
         if let (Some(record), Some(answer)) = (record.as_object_mut(), answer.as_object()) {
             record.extend(answer.clone());
         }
-        let _ = pi.write(&record).await;
+        if pi.write(&record).await.is_ok() {
+            self.sink.send(super::requests::confirmed(response.id));
+        }
     }
 
     /// Waiting dialogs end with the turn: Pi hears them cancelled.

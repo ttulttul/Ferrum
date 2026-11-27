@@ -1007,6 +1007,7 @@ mod tests {
                     kind: "command".into(),
                     runtime_mode: "full-access".into(),
                     supports_feedback: false,
+                    reports_resolution: false,
                     fields: Default::default(),
                 },
             },
