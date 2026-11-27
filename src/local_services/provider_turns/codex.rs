@@ -1137,11 +1137,6 @@ impl Session {
     /// native thread so they go to the child thread, not the parent's.
     fn handle_child(&mut self, child: &str, method: &str, params: &Value) -> Vec<ProviderItem> {
         let mut parent = Vec::new();
-        let tag = |mut item: ProviderItem, turn: &str| {
-            item.fields.insert("subagentThread".into(), json!(child));
-            item.fields.insert("nativeTurnId".into(), json!(turn));
-            item
-        };
         match method {
             "turn/started" | "turn/completed" => {
                 let turn = &params["turn"];
@@ -1160,58 +1155,25 @@ impl Session {
                     self.subagents.child_turn_ended(child, "interrupted");
                     return parent;
                 }
-                let status = if started {
-                    "running"
-                } else {
-                    match turn["status"].as_str() {
-                        Some("completed") => "completed",
-                        Some("interrupted") => "interrupted",
-                        _ => "failed",
-                    }
-                };
-                let mut marker =
-                    ProviderItem::new(format!("{turn_id}:turn"), "subagent_turn", status);
-                if let Some(model) = self.subagents.model(child) {
-                    marker = marker.with("model", model);
-                }
-                self.sink.send(ProviderEvent::TurnItem {
-                    item: tag(marker, turn_id),
-                });
-                let changed = if started {
-                    self.subagents.child_turn_started(child)
-                } else {
-                    self.subagents.child_turn_ended(child, status)
-                };
+                let (marker, changed) = child_turn(&mut self.subagents, child, started, turn);
+                self.sink.send(ProviderEvent::TurnItem { item: marker });
                 parent.extend(changed);
             }
             "item/started" | "item/completed" => {
-                let completed = method == "item/completed";
-                let native = &params["item"];
                 let turn = params["turnId"].as_str().unwrap_or_default();
                 if self.stopped_child_turns.contains(turn) {
                     return parent;
                 }
-                if let Some(mut item) = map_item(native, completed) {
-                    // A child's command is no background work of the parent's.
-                    item.fields.remove("completionWake");
-                    self.sink.send(ProviderEvent::TurnItem {
-                        item: tag(item, turn),
-                    });
-                }
-                let progress = match native["type"].as_str() {
-                    Some("commandExecution") => native["command"].as_str(),
-                    Some("dynamicToolCall") => native["title"].as_str().or(native["tool"].as_str()),
-                    _ => None,
-                };
-                parent.extend(progress.and_then(|line| self.subagents.child_progress(child, line)));
-                let final_answer = matches!(
-                    native["phase"].as_str(),
-                    Some("final_answer" | "finalAnswer")
+                let (item, changed) = child_item(
+                    &mut self.subagents,
+                    child,
+                    method == "item/completed",
+                    params,
                 );
-                if completed && native["type"] == "agentMessage" && final_answer {
-                    let text = native["text"].as_str().unwrap_or_default();
-                    parent.extend(self.subagents.child_answered(child, text));
+                if let Some(item) = item {
+                    self.sink.send(ProviderEvent::TurnItem { item });
                 }
+                parent.extend(changed);
             }
             _ => {}
         }
@@ -1745,6 +1707,75 @@ fn item_status(item: &Value, completed: bool) -> &'static str {
     }
 }
 
+/// A subagent's own turn starting or ending: its marker for the child thread (a `subagent_turn`
+/// item, with the child's model), and its subagent running or ending as the turn did.
+pub(super) fn child_turn(
+    subagents: &mut super::codex_subagents::Subagents,
+    child: &str,
+    started: bool,
+    turn: &Value,
+) -> (ProviderItem, Option<ProviderItem>) {
+    let turn_id = turn["id"].as_str().unwrap_or_default();
+    let status = if started {
+        "running"
+    } else {
+        match turn["status"].as_str() {
+            Some("completed") => "completed",
+            Some("interrupted") => "interrupted",
+            _ => "failed",
+        }
+    };
+    let mut marker = ProviderItem::new(format!("{turn_id}:turn"), "subagent_turn", status)
+        .with("subagentThread", child)
+        .with("nativeTurnId", turn_id);
+    if let Some(model) = subagents.model(child) {
+        marker = marker.with("model", model);
+    }
+    let changed = if started {
+        subagents.child_turn_started(child)
+    } else {
+        subagents.child_turn_ended(child, status)
+    };
+    (marker, changed)
+}
+
+/// A subagent's own item (`item/started` or `item/completed` on the child's thread): the item,
+/// tagged for the child thread, and what it changes on the parent's subagent (its running work
+/// as progress, its final answer as result). The shared app-server handles these as they arrive
+/// while the parent is idle, as a turn does.
+pub(super) fn child_item(
+    subagents: &mut super::codex_subagents::Subagents,
+    child: &str,
+    completed: bool,
+    params: &Value,
+) -> (Option<ProviderItem>, Vec<ProviderItem>) {
+    let native = &params["item"];
+    let turn = params["turnId"].as_str().unwrap_or_default();
+    let item = map_item(native, completed).map(|mut item| {
+        // A child's command is no background work of the parent's.
+        item.fields.remove("completionWake");
+        item.fields.insert("subagentThread".into(), json!(child));
+        item.fields.insert("nativeTurnId".into(), json!(turn));
+        item
+    });
+    let mut parent = Vec::new();
+    let progress = match native["type"].as_str() {
+        Some("commandExecution") => native["command"].as_str(),
+        Some("dynamicToolCall") => native["title"].as_str().or(native["tool"].as_str()),
+        _ => None,
+    };
+    parent.extend(progress.and_then(|line| subagents.child_progress(child, line)));
+    let final_answer = matches!(
+        native["phase"].as_str(),
+        Some("final_answer" | "finalAnswer")
+    );
+    if completed && native["type"] == "agentMessage" && final_answer {
+        let text = native["text"].as_str().unwrap_or_default();
+        parent.extend(subagents.child_answered(child, text));
+    }
+    (item, parent)
+}
+
 /// A Codex thread item as a turn item, or `None` for items a client does not
 /// render from the provider (the user's own message).
 fn map_item(item: &Value, completed: bool) -> Option<ProviderItem> {
@@ -1989,6 +2020,45 @@ fn retry_progress(message: &str) -> Option<(u64, u64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_childs_items_and_turn_end_go_to_its_thread_and_its_subagent() {
+        let mut subagents = super::super::codex_subagents::Subagents::default();
+        let started = json!({"type": "subAgentActivity", "id": "call_1", "kind": "started",
+            "agentThreadId": "c1", "agentPath": "/root/read"});
+        subagents.activity(&started);
+        let command = json!({"turnId": "t1", "item": {"type": "commandExecution", "id": "cmd_1",
+            "command": "head -1 README.md", "status": "inProgress"}});
+        let (item, parent) = child_item(&mut subagents, "c1", false, &command);
+        let item = item.unwrap();
+        assert_eq!(
+            (
+                item.fields["subagentThread"].as_str(),
+                item.fields["nativeTurnId"].as_str()
+            ),
+            (Some("c1"), Some("t1"))
+        );
+        assert_eq!(parent[0].fields["progress"], "head -1 README.md");
+        let answer = json!({"turnId": "t1", "item": {"type": "agentMessage", "id": "msg_1",
+            "text": "# Title", "phase": "final_answer"}});
+        let (_, parent) = child_item(&mut subagents, "c1", true, &answer);
+        assert_eq!(parent[0].fields["result"], "# Title");
+        let (marker, ended) = child_turn(
+            &mut subagents,
+            "c1",
+            false,
+            &json!({"id": "t1", "status": "completed"}),
+        );
+        assert_eq!(
+            (
+                marker.id.as_str(),
+                marker.kind.as_str(),
+                marker.status.as_str()
+            ),
+            ("t1:turn", "subagent_turn", "completed")
+        );
+        assert_eq!(ended.unwrap().status, "completed");
+    }
 
     #[test]
     fn a_usage_limit_resets_when_its_last_exhausted_window_does() {
