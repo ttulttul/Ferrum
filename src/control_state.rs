@@ -364,17 +364,6 @@ impl ControlState {
             .collect()
     }
 
-    /// `commit`, leaving the live events `suppress` names (`type:id` keys
-    /// of snapshots a later snapshot of the same batch replaces) out of what
-    /// subscribers get, as the reference's provider commit batch drops them.
-    pub(crate) async fn commit_suppressing(
-        &self,
-        event: Event,
-        suppress: Vec<String>,
-    ) -> anyhow::Result<ServerEvent> {
-        self.commit_with(event, None, &suppress).await
-    }
-
     /// `commit` of what a provider CLI reported while no turn ran: its turn item updates stream
     /// with the thread's next provider event, as the reference's provider commit batch keeps an
     /// idle stream's snapshots until the stream next reports.
@@ -470,10 +459,99 @@ impl ControlState {
         let mut store = self.store.write().await;
         let mut next_event_id = self.next_event_id.lock().await;
         let mut shared = self.shared.lock().await;
+        let record = self
+            .commit_locked(
+                &mut store,
+                &mut next_event_id,
+                &mut shared,
+                event,
+                receipt,
+                suppress,
+            )
+            .await?;
+        drop(shared);
+        let record = self
+            .commit_applied(&mut store, &mut next_event_id, record)
+            .await?;
+        Ok(record)
+    }
+
+    /// Commits `events` in order as one batch: no other commit lands between
+    /// them, as the reference's provider commit batch writes a batch in one
+    /// transaction. A snapshot read together with others is published with
+    /// them, before anything a client does on seeing the first (a stop's
+    /// card). Each event's `suppress` names the live events (`type:id` keys
+    /// of snapshots a later snapshot of the same batch replaces) left out of
+    /// what subscribers get, as the reference's batch drops them. Stops at
+    /// the first event that fails, whose error is the last result.
+    pub(crate) async fn commit_batch(
+        &self,
+        events: Vec<(Event, Vec<String>)>,
+    ) -> Vec<anyhow::Result<ServerEvent>> {
+        Box::pin(self.commit_batch_unboxed(events)).await
+    }
+
+    async fn commit_batch_unboxed(
+        &self,
+        events: Vec<(Event, Vec<String>)>,
+    ) -> Vec<anyhow::Result<ServerEvent>> {
+        let _commit = crate::commit_timing::phase("commit batch");
+        let touched: Vec<String> = {
+            let store = self.store.read().await;
+            events
+                .iter()
+                .flat_map(|(event, _)| crate::shared_store::touched_threads(&store, event))
+                .collect()
+        };
+        self.load_whole(touched).await;
+        let mut store = self.store.write().await;
+        let mut next_event_id = self.next_event_id.lock().await;
+        let mut shared = self.shared.lock().await;
+        let mut results = Vec::with_capacity(events.len());
+        for (event, suppress) in events {
+            let committed = match self
+                .commit_locked(
+                    &mut store,
+                    &mut next_event_id,
+                    &mut shared,
+                    event,
+                    None,
+                    &suppress,
+                )
+                .await
+            {
+                Ok(record) => {
+                    self.commit_applied(&mut store, &mut next_event_id, record)
+                        .await
+                }
+                Err(error) => Err(error),
+            };
+            let failed = committed.is_err();
+            results.push(committed);
+            if failed {
+                break;
+            }
+        }
+        results
+    }
+
+    /// The part of a commit made with the store, the event counter and the
+    /// shared database held: plans `event`, writes it to the shared database,
+    /// and gives the record to append and apply ([`ControlState::commit_applied`]).
+    async fn commit_locked(
+        &self,
+        store: &mut Store,
+        next_event_id: &mut u64,
+        shared: &mut Option<Box<dyn crate::shared_store::SharedStore + Send>>,
+        event: Event,
+        receipt: Option<CommandReceipt>,
+        suppress: &[String],
+    ) -> anyhow::Result<Pending> {
+        let store = &*store;
         // A thread whose slim records alone are loaded is read whole first:
         // the plan below diffs whole projections only.
         let phase = crate::commit_timing::phase("hydrate check");
-        crate::shared_store::hydrate_touched(&store, &event)?;
+        crate::shared_store::hydrate_touched(store, &event)?;
         drop(phase);
         let mut record = ServerEvent {
             id: *next_event_id + 1,
@@ -489,7 +567,7 @@ impl ControlState {
         let shell_listening = self.shell_events.receiver_count() > 0;
         if shared.is_some() || shell_listening {
             let _phase = crate::commit_timing::phase("plan (shared_commit)");
-            let (planned_commit, stored) = shared_commit(&store, &record, *next_event_id);
+            let (planned_commit, stored) = shared_commit(store, &record, *next_event_id);
             stored_after = stored;
             commit = Some(planned_commit);
         }
@@ -499,7 +577,7 @@ impl ControlState {
         let mut live_events = 0;
         if self.events.receiver_count() > 0 {
             let _phase = crate::commit_timing::phase("live events (thread_events)");
-            if let Some(mut events) = thread_events(&store, &record, &stored_after, suppress) {
+            if let Some(mut events) = thread_events(store, &record, &stored_after, suppress) {
                 if let Some(items) = events.items.as_mut() {
                     self.hold_idle_snapshots(&events.thread_id, &record.event, suppress, items);
                 }
@@ -521,7 +599,7 @@ impl ControlState {
             .iter()
             .filter(|_| shell_listening)
             .flat_map(|commit| &commit.events)
-            .filter_map(|event| crate::shell_stream::Change::from_event(event, &store))
+            .filter_map(|event| crate::shell_stream::Change::from_event(event, store))
             .collect();
         drop(shell_phase);
         if let (Some(writer), Some(mut commit)) = (shared.as_mut(), commit) {
@@ -533,7 +611,26 @@ impl ControlState {
                 return Err(error);
             }
         }
-        drop(shared);
+        Ok(Pending {
+            record,
+            stored_after,
+            shell_changes,
+        })
+    }
+
+    /// The rest of a commit, with the store and the event counter held:
+    /// appends the record to the log, applies it, and broadcasts it.
+    async fn commit_applied(
+        &self,
+        store: &mut Store,
+        next_event_id: &mut u64,
+        pending: Pending,
+    ) -> anyhow::Result<ServerEvent> {
+        let Pending {
+            record,
+            stored_after,
+            shell_changes,
+        } = pending;
         self.log.lock().await.append(&record)?;
         *next_event_id = record.id;
         #[cfg(feature = "native")]
@@ -563,6 +660,13 @@ impl ControlState {
         let _ = self.events.send(record.clone());
         Ok(record)
     }
+}
+
+/// A commit planned and written to the shared database, to append and apply.
+struct Pending {
+    record: ServerEvent,
+    stored_after: Vec<(String, crate::shared_store::StoredAfter)>,
+    shell_changes: Vec<crate::shell_stream::Change>,
 }
 
 /// What `record` writes to the shared database, its events numbered after
