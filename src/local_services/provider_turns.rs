@@ -72,6 +72,13 @@ impl ProviderProcesses {
         self.claude.take_wakes()
     }
 
+    /// What idle Claude CLIs report as it arrives; taken once.
+    pub(crate) fn take_idle_events(
+        &self,
+    ) -> Option<mpsc::UnboundedReceiver<crate::workspace::provider::ProviderIdleEvent>> {
+        self.claude.take_idle_events()
+    }
+
     /// The continuation for `wake` ended without starting.
     pub(crate) fn retire_wake(&self, wake: &crate::workspace::provider::ProviderWake) {
         self.claude.retire_wake(&wake.native_thread_id, wake.token);

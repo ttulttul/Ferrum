@@ -240,6 +240,11 @@ impl Workspace for LocalWorkspace {
     ) -> Option<mpsc::UnboundedReceiver<crate::workspace::provider::ProviderWake>> {
         self.providers.take_wakes()
     }
+    fn provider_idle_events(
+        &self,
+    ) -> Option<mpsc::UnboundedReceiver<crate::workspace::provider::ProviderIdleEvent>> {
+        self.providers.take_idle_events()
+    }
     fn retire_provider_wake(&self, wake: &crate::workspace::provider::ProviderWake) {
         self.providers.retire_wake(wake);
     }

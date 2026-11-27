@@ -243,6 +243,16 @@ pub struct ProviderWake {
     pub delivery: Option<String>,
 }
 
+/// A provider event a CLI produced while no turn ran, for its app thread's latest run, as the
+/// reference's adapter writes what an idle session reports as it arrives (a background
+/// subagent's child answering). Local to the workspace process, as wakes are.
+#[derive(Clone, Debug)]
+pub struct ProviderIdleEvent {
+    /// The app thread whose turns the CLI runs.
+    pub app_thread_id: String,
+    pub event: ProviderEvent,
+}
+
 /// What an OpenCode turn needs beyond the common launch: the configured
 /// server (`serverUrl`, `serverPassword`; none for a server of the session's
 /// own) and the selection's `agent` option. Each field is omitted when empty.

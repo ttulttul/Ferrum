@@ -962,19 +962,8 @@ impl<'a> Attempt<'a> {
         // Subagents' own messages stay inside their tool call; a native subagent's go to its
         // child thread.
         let nested = !message["parent_tool_use_id"].is_null();
-        if let Some(task) = message["parent_tool_use_id"]
-            .as_str()
-            .and_then(|call| self.cli.subagents.task_of(call))
-        {
-            if let Some(item) = self.cli.subagents.child_frame(&task, &message) {
-                self.sink.send(ProviderEvent::TurnItem { item });
-            }
-            for item in self.cli.subagents.child_message(&task, &message) {
-                self.sink.send(ProviderEvent::TurnItem { item });
-            }
-            for item in self.child_tools(&task, &message) {
-                self.sink.send(ProviderEvent::TurnItem { item });
-            }
+        for item in child_items(&mut self.cli.subagents, &message).unwrap_or_default() {
+            self.sink.send(ProviderEvent::TurnItem { item });
         }
         if kind == "system"
             && matches!(
@@ -1283,38 +1272,6 @@ impl<'a> Attempt<'a> {
         self.sink
             .send(ProviderEvent::TurnItem { item: item.clone() });
         self.tools.insert(id.into(), item);
-    }
-
-    /// A subagent's own tool calls and their results, for its child thread.
-    fn child_tools(&mut self, task: &str, message: &Value) -> Vec<ProviderItem> {
-        let blocks = message["message"]["content"]
-            .as_array()
-            .into_iter()
-            .flatten();
-        match message["type"].as_str() {
-            Some("assistant") => blocks
-                .filter(|block| block["type"] == "tool_use")
-                .filter(|block| !matches!(block["name"].as_str(), Some("Agent" | "TodoWrite")))
-                .filter_map(|block| {
-                    let id = block["id"].as_str()?;
-                    let name = block["name"].as_str().unwrap_or_default();
-                    self.cli
-                        .subagents
-                        .child_tool(task, tool_item(id, name, &block["input"]))
-                })
-                .collect(),
-            Some("user") => blocks
-                .filter(|block| block["type"] == "tool_result")
-                .filter_map(|block| {
-                    let item = self
-                        .cli
-                        .subagents
-                        .child_tool_result(block["tool_use_id"].as_str()?)?;
-                    Some(settle_tool(item, block, message))
-                })
-                .collect(),
-            _ => Vec::new(),
-        }
     }
 
     fn tool_results(&mut self, message: &Value) {
@@ -1711,6 +1668,45 @@ impl<'a> Attempt<'a> {
 }
 
 /// A Claude Code tool call as a turn item.
+/// What a native subagent's own message changes, when it is one (`parent_tool_use_id` names an
+/// `Agent` call that started a task): the subagent running again at its first message, the
+/// child's answer and its tool calls on the child thread. The idle CLI's reader handles these as
+/// they arrive, as a turn does.
+pub(super) fn child_items(
+    subagents: &mut super::claude_subagents::ClaudeSubagents,
+    message: &Value,
+) -> Option<Vec<ProviderItem>> {
+    let task = subagents.task_of(message["parent_tool_use_id"].as_str()?)?;
+    let mut items: Vec<ProviderItem> = subagents.child_frame(&task, message).into_iter().collect();
+    items.extend(subagents.child_message(&task, message));
+    let blocks = message["message"]["content"]
+        .as_array()
+        .into_iter()
+        .flatten();
+    match message["type"].as_str() {
+        Some("assistant") => items.extend(
+            blocks
+                .filter(|block| block["type"] == "tool_use")
+                .filter(|block| !matches!(block["name"].as_str(), Some("Agent" | "TodoWrite")))
+                .filter_map(|block| {
+                    let id = block["id"].as_str()?;
+                    let name = block["name"].as_str().unwrap_or_default();
+                    subagents.child_tool(&task, tool_item(id, name, &block["input"]))
+                }),
+        ),
+        Some("user") => items.extend(
+            blocks
+                .filter(|block| block["type"] == "tool_result")
+                .filter_map(|block| {
+                    let item = subagents.child_tool_result(block["tool_use_id"].as_str()?)?;
+                    Some(settle_tool(item, block, message))
+                }),
+        ),
+        _ => {}
+    }
+    Some(items)
+}
+
 /// A tool call as its `tool_result` ends it: its status and output.
 fn settle_tool(mut item: ProviderItem, block: &Value, message: &Value) -> ProviderItem {
     let failed = block["is_error"] == true;

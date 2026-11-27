@@ -1678,6 +1678,13 @@ where
     if let Some(wakes) = state.workspace.provider_wakes() {
         tokio::spawn(crate::provider_continuation::run(state.clone(), wakes));
     }
+    // What it reports while no turn runs is recorded as it arrives.
+    if let Some(events) = state.workspace.provider_idle_events() {
+        tokio::spawn(crate::provider_continuation::record_idle(
+            state.clone(),
+            events,
+        ));
+    }
     let (stopping_tx, stopping_rx) = oneshot::channel::<()>();
     let stopping_endpoint = endpoint.clone();
     let stopping_state = state.clone();

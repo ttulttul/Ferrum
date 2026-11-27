@@ -340,6 +340,12 @@ pub trait Workspace: MaybeSendSync {
     fn provider_wakes(&self) -> Option<mpsc::UnboundedReceiver<provider::ProviderWake>> {
         None
     }
+    /// What provider CLIs this workspace keeps running report while no turn runs
+    /// ([`provider::ProviderIdleEvent`]), for their threads' latest runs; taken once. None for
+    /// a workspace that reports none.
+    fn provider_idle_events(&self) -> Option<mpsc::UnboundedReceiver<provider::ProviderIdleEvent>> {
+        None
+    }
     /// The continuation run for `wake` ended without starting: the CLI
     /// drops what it would have shown, and may report its next wake.
     fn retire_provider_wake(&self, _wake: &provider::ProviderWake) {}
