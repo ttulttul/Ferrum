@@ -1,0 +1,9 @@
+fragment PlanningStatusFields on PlanningStatus {
+  id
+  name
+  category {
+    key
+    state
+    stateReason
+  }
+}
