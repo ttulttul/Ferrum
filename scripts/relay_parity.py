@@ -18,7 +18,6 @@ from urllib.parse import urlencode
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, ed25519, padding, rsa, utils
 
-from parity_gaps import Gaps
 from parity_harness import ROOT, TRACE, encode, free_port, http, server_env
 
 ISSUER = "https://relay.example.test"
@@ -196,22 +195,21 @@ def run(args, directory):
     # A signed deletion must be acknowledged only after the relay owns the request.
     signing_key = os.urandom(32)
     env["CLERK_WEBHOOK_SIGNING_SECRET"] = "whsec_" + base64.b64encode(signing_key).decode()
-    body = encode({"type": "user.deleted", "data": {"id": "fixture"}})
-    stamp = str(int(time.time()))
-    signature = hmac.digest(signing_key, b"evt." + stamp.encode() + b"." + body, "sha256")
-    headers = {"svix-id": "evt", "svix-timestamp": stamp, "traceparent": TRACE,
-               "svix-signature": "v1," + base64.b64encode(signature).decode()}
     with serve([args.node, ROOT/"scripts/relay_reference.mjs", args.checkout, str(reference)], reference, env) as original, serve(cmd, port, env) as rust:
-        expected, _, ref_body = http(original, "POST", "/v1/webhooks/clerk", body, headers)
-        actual, _, rust_body = http(rust, "POST", "/v1/webhooks/clerk", body, headers)
-        assert (expected, ref_body) == (200, b""), (expected, ref_body)
-        gaps = Gaps("relay_parity")
-        if (actual, rust_body) != (expected, ref_body):
-            assert actual == 500 and json.loads(rust_body) == {
-                "_tag": "RelayInternalError", "code": "internal_error", "reason": "internal_error",
-                "traceId": TRACE.split("-")[1]}, (actual, rust_body)
-            assert not gaps.differs("signed account deletion")
-        assert not gaps.finish()
+        for event, expected in [({"type": "user.updated", "data": {}}, 204),
+                                ({"type": "user.deleted", "data": {}}, 400),
+                                ({"type": "user.deleted", "data": {"id": "deleted-fixture"}}, 200)]:
+            body = encode(event)
+            stamp = str(int(time.time()))
+            tag = hmac.digest(signing_key, b"fixture." + stamp.encode() + b"." + body, "sha256")
+            headers = {"svix-id": "fixture", "svix-timestamp": stamp,
+                       "svix-signature": "v1," + base64.b64encode(tag).decode()}
+            for url in (original, rust):
+                status, _, response = http(url, "POST", "/v1/webhooks/clerk", body, headers)
+                assert (status, response) == (expected, b""), (status, response)
+                status, _, response = http(url, "POST", "/v1/webhooks/clerk", body)
+                assert (status, response) == (401, b""), (status, response)
+        print("Signed account events and unsigned requests matched", flush=True)
     print("Rust signed token exchange, replay rejection, mobile registration, account isolation, environment linking, revocation and restart checks passed")
 
 

@@ -1,5 +1,1 @@
-{
-  "relay_parity": {
-    "signed account deletion": "The reference durably queues a verified Clerk user.deleted event and acknowledges it with an empty 200. Ferrum has no configured account-deletion handler and returns RelayInternalError."
-  }
-}
+{}
