@@ -2383,14 +2383,15 @@ impl Thread {
         // The reference's adapters report an assistant message only once it
         // has text, and a Codex file change only once it ends. Such an item
         // keeps its place among the turn's items while it is not shown.
-        let empty = item
-            .fields
-            .get("text")
-            .and_then(Value::as_str)
-            .is_none_or(str::is_empty);
-        if running
-            && ((item.kind == "assistant_message" && empty)
-                || (driver == provider::CODEX && item.kind == "file_change"))
+        let text = record
+            .visible_text
+            .as_ref()
+            .map(|(text, _)| text.as_str())
+            .or_else(|| item.fields.get("text").and_then(Value::as_str))
+            .unwrap_or_default();
+        let empty = text.is_empty();
+        if (item.kind == "assistant_message" && empty && (running || record.visible_text.is_some()))
+            || (running && driver == provider::CODEX && item.kind == "file_change")
         {
             out.items.push((index, json!({ HIDDEN_ITEM: true })));
             return;
@@ -2477,14 +2478,7 @@ impl Thread {
         }
         let streams = matches!(item.kind.as_str(), "assistant_message" | "reasoning");
         if streams {
-            row.insert(
-                "text".into(),
-                json!(item
-                    .fields
-                    .get("text")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()),
-            );
+            row.insert("text".into(), json!(text));
             row.insert("streaming".into(), json!(running));
         }
         if item.kind == "assistant_message" {
@@ -2505,8 +2499,11 @@ impl Thread {
                 "updatedAt": updated
             }));
         }
-        // Muse's failure row has no node of its own.
-        if driver == provider::MUSE && item.kind == "error" {
+        // The response streaming filter drops the running assistant node.
+        // Muse's failure row also has no node of its own.
+        if (running && record.visible_text.is_some())
+            || (driver == provider::MUSE && item.kind == "error")
+        {
             out.items.push((index, Value::Object(row)));
             return;
         }

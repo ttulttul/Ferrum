@@ -858,6 +858,9 @@ impl crate::orchestration::CommandHost for AppState {
 }
 
 impl crate::turn::TurnHost for AppState {
+    fn turn_settings(&self) -> anyhow::Result<serde_json::Value> {
+        crate::orchestration::CommandHost::effective_settings(self)
+    }
     fn workspace(&self) -> &dyn crate::workspace::Workspace {
         &*self.workspace
     }

@@ -1823,6 +1823,9 @@ impl crate::orchestration::CommandHost for PlaneCommands {
 }
 
 impl crate::turn::TurnHost for ControlPlane {
+    fn turn_settings(&self) -> anyhow::Result<serde_json::Value> {
+        self.settings.internal()
+    }
     fn workspace(&self) -> &dyn Workspace {
         &self.host.workspace
     }

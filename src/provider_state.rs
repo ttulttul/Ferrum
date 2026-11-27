@@ -209,6 +209,8 @@ impl RequestRecord {
 #[derive(Clone, Debug)]
 pub struct ItemRecord {
     pub item: ProviderItem,
+    /// Delivered text and receipt time of the last full assistant snapshot.
+    pub visible_text: Option<(String, u64)>,
     pub first_at: u64,
     pub updated_at: u64,
     /// Streamed text recorded while still held, not shown until the item's
@@ -229,13 +231,23 @@ impl ProviderState {
     /// the attempt a steering restart replaced while its turn is still
     /// ending, else to the run's current attempt.
     pub(crate) fn apply(&mut self, run: Uuid, event: &ProviderEvent, at: u64) {
+        self.apply_snapshot(run, event, at, None);
+    }
+
+    pub(crate) fn apply_snapshot(
+        &mut self,
+        run: Uuid,
+        event: &ProviderEvent,
+        at: u64,
+        visible_text: Option<&str>,
+    ) {
         let open = self
             .superseded
             .get(&run)
             .and_then(|attempts| attempts.last())
             .is_some_and(|attempt| attempt.open);
         if !open {
-            return self.apply_current(run, event, at);
+            return self.apply_current(run, event, at, visible_text);
         }
         let Some(mut attempt) = self.superseded.get_mut(&run).and_then(Vec::pop) else {
             return;
@@ -249,7 +261,7 @@ impl ProviderState {
             .thread
             .as_ref()
             .map(|thread| (thread.status, thread.updated_at));
-        self.apply_current(run, event, at);
+        self.apply_current(run, event, at, visible_text);
         // Its turn's end leaves the provider thread as it was: the run goes
         // on, and the next attempt's start reports it.
         if matches!(event, ProviderEvent::TurnTerminal { .. }) {
@@ -273,7 +285,13 @@ impl ProviderState {
         }
     }
 
-    fn apply_current(&mut self, run: Uuid, event: &ProviderEvent, at: u64) {
+    fn apply_current(
+        &mut self,
+        run: Uuid,
+        event: &ProviderEvent,
+        at: u64,
+        visible_text: Option<&str>,
+    ) {
         if let ProviderEvent::SessionStartup { phase } = event {
             self.session_startup = Some((phase.clone(), at));
             return;
@@ -534,8 +552,12 @@ impl ProviderState {
                         let selection_only = item.kind == "subagent"
                             && known.item != *item
                             && without_selection(&known.item) == without_selection(item);
+                        let text_held = visible_text.is_some()
+                            && visible_text
+                                == known.visible_text.as_ref().map(|(text, _)| text.as_str());
+                        known.visible_text = visible_text.map(|text| (text.to_owned(), at));
                         known.item = item.clone();
-                        if !selection_only {
+                        if !text_held && !selection_only {
                             known.updated_at = at;
                         }
                         // An item's end carries all its text.
@@ -544,6 +566,7 @@ impl ProviderState {
                         }
                     }
                     None => record.items.push(ItemRecord {
+                        visible_text: visible_text.map(|text| (text.to_owned(), at)),
                         item: item.clone(),
                         first_at: at,
                         updated_at: at,
@@ -689,6 +712,7 @@ impl ProviderState {
                     "approval_request"
                 };
                 record.items.push(ItemRecord {
+                    visible_text: None,
                     item: ProviderItem::new(format!("request:{}", request.id), kind, "waiting"),
                     first_at: at,
                     updated_at: at,
@@ -721,6 +745,7 @@ impl ProviderState {
                 {
                     request.delivery_failed_at = Some(at);
                     record.items.push(ItemRecord {
+                        visible_text: None,
                         item: ProviderItem::new(
                             format!("delivery:{id}"),
                             "approval_request",
