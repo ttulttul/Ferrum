@@ -155,7 +155,10 @@ async fn serve(args: Args, bootstrap: Option<Bootstrap>) -> anyhow::Result<()> {
     if args.relay {
         let listener = tokio::net::TcpListener::bind(listen).await?;
         let relay = t3code_server::relay_service::RelayService::open(&dir, listener.local_addr()?)?;
-        axum::serve(listener, t3code_server::relay_http::router(relay)).await?;
+        let sweep = tokio::spawn(relay.clone().sweep_account_deletions());
+        let result = axum::serve(listener, t3code_server::relay_http::router(relay)).await;
+        sweep.abort();
+        result?;
         return Ok(());
     }
     // Before anything opens the database: one server per T3 home, shared
