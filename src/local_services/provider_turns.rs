@@ -141,6 +141,10 @@ pub(crate) fn start(
     if provider.driver == CODEX {
         // A subagent that ends after its parent's turn wakes the parent.
         processes.codex.share_wakes(processes.claude.wake_sender());
+        // What it does meanwhile is recorded as it arrives.
+        processes
+            .codex
+            .share_idle_events(processes.claude.idle_sender());
         tokio::spawn(codex::run(
             spec,
             provider,

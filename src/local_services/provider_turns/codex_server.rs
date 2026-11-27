@@ -37,6 +37,8 @@ pub(crate) struct Registry(
     Mutex<HashMap<String, Arc<AppServer>>>,
     /// Where a subagent that ends after its parent's turn sends its wake.
     std::sync::OnceLock<mpsc::UnboundedSender<crate::workspace::provider::ProviderWake>>,
+    /// Where what such a subagent does meanwhile goes, as it arrives.
+    std::sync::OnceLock<mpsc::UnboundedSender<crate::workspace::provider::ProviderIdleEvent>>,
 );
 
 impl Registry {
@@ -46,6 +48,14 @@ impl Registry {
         wakes: mpsc::UnboundedSender<crate::workspace::provider::ProviderWake>,
     ) {
         let _ = self.1.set(wakes);
+    }
+
+    /// The channel what an idle parent's subagents do goes to (the workspace's idle events).
+    pub(crate) fn share_idle_events(
+        &self,
+        events: mpsc::UnboundedSender<crate::workspace::provider::ProviderIdleEvent>,
+    ) {
+        let _ = self.2.set(events);
     }
 
     fn with<T>(&self, f: impl FnOnce(&mut HashMap<String, Arc<AppServer>>) -> T) -> T {
@@ -383,8 +393,11 @@ impl AppServer {
                     .or_else(|| routes.children.get(thread).copied());
                 if session.is_none() && routes.orphans.contains_key(thread) {
                     let thread = thread.to_owned();
-                    let wake = self.hold_orphan_line(&mut routes, &thread, line, &message);
+                    let mut idle = Vec::new();
+                    let wake =
+                        self.hold_orphan_line(&mut routes, &thread, line, &message, &mut idle);
                     drop(routes);
+                    self.send_idle(idle);
                     self.send_wake(wake);
                     return;
                 }
@@ -407,7 +420,9 @@ impl AppServer {
         }
     }
 
-    /// Holds a frame about a child whose parent's turn ended; the child's turn ending
+    /// A frame about a child whose parent's turn ended. Its items are handled as they arrive,
+    /// as the reference's adapter follows the child (`idle`: what they change, on the parent's
+    /// thread); anything else is held for the parent's next turn, and the child's turn ending
     /// (completed or failed) is the wake it starts on the parent.
     fn hold_orphan_line(
         &self,
@@ -415,11 +430,37 @@ impl AppServer {
         thread: &str,
         line: String,
         message: &Value,
+        idle: &mut Vec<crate::workspace::provider::ProviderIdleEvent>,
     ) -> Option<crate::workspace::provider::ProviderWake> {
-        let orphan = routes.orphans.get_mut(thread)?;
-        orphan.buffered.push(line);
+        let Routes {
+            orphans, carried, ..
+        } = routes;
+        let orphan = orphans.get_mut(thread)?;
         let params = &message["params"];
-        match message["method"].as_str() {
+        let method = message["method"].as_str();
+        let subagents = carried.get_mut(&orphan.parent);
+        match (method, subagents) {
+            (
+                Some(method @ ("item/started" | "item/completed" | "turn/completed")),
+                Some(subagents),
+            ) if subagents.follows(thread) => {
+                let (item, changed) = if method == "turn/completed" {
+                    let (marker, changed) =
+                        super::codex::child_turn(subagents, thread, false, &params["turn"]);
+                    (Some(marker), changed.into_iter().collect())
+                } else {
+                    super::codex::child_item(subagents, thread, method == "item/completed", params)
+                };
+                for item in item.into_iter().chain(changed) {
+                    idle.push(crate::workspace::provider::ProviderIdleEvent {
+                        app_thread_id: orphan.app_thread.clone(),
+                        event: crate::workspace::ProviderEvent::TurnItem { item },
+                    });
+                }
+            }
+            _ => orphan.buffered.push(line),
+        }
+        match method {
             Some("item/completed")
                 if params["item"]["type"] == "agentMessage"
                     && matches!(
@@ -442,8 +483,7 @@ impl AppServer {
                     orphan.answer.clone(),
                 );
                 let (detail, notification) =
-                    routes
-                        .carried
+                    carried
                         .get(&parent)?
                         .wake(thread, status, answer.as_deref())?;
                 Some(crate::workspace::provider::ProviderWake {
@@ -457,6 +497,17 @@ impl AppServer {
                 })
             }
             _ => None,
+        }
+    }
+
+    fn send_idle(&self, events: Vec<crate::workspace::provider::ProviderIdleEvent>) {
+        let Some(registry) = self.registry.upgrade() else {
+            return;
+        };
+        if let Some(sender) = registry.2.get() {
+            for event in events {
+                let _ = sender.send(event);
+            }
         }
     }
 
@@ -691,6 +742,7 @@ impl Conn {
             return;
         }
         let mut wakes = Vec::new();
+        let mut idle = Vec::new();
         {
             let mut routes = self.server.lock_routes();
             for child in &running {
@@ -715,13 +767,17 @@ impl Conn {
                     continue;
                 };
                 if routes.orphans.contains_key(&thread) {
-                    wakes.push(
-                        self.server
-                            .hold_orphan_line(&mut routes, &thread, line, &message),
-                    );
+                    wakes.push(self.server.hold_orphan_line(
+                        &mut routes,
+                        &thread,
+                        line,
+                        &message,
+                        &mut idle,
+                    ));
                 }
             }
         }
+        self.server.send_idle(idle);
         for wake in wakes {
             self.server.send_wake(wake);
         }

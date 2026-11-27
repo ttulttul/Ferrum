@@ -104,6 +104,11 @@ impl Sessions {
             .take()
     }
 
+    /// Where idle events go, for other providers' idle work (a Codex subagent).
+    pub(crate) fn idle_sender(&self) -> mpsc::UnboundedSender<ProviderIdleEvent> {
+        self.idle_events.clone()
+    }
+
     /// What idle CLIs report as it arrives; taken once, by the host that records it.
     pub(crate) fn take_idle_events(&self) -> Option<mpsc::UnboundedReceiver<ProviderIdleEvent>> {
         self.idle_receiver
