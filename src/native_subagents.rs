@@ -75,7 +75,7 @@ pub(crate) async fn record_child(
         record_child_turn(state, parent_thread_id, driver, native, item).await;
         return Recorded::Other;
     }
-    if item.fields.contains_key("claudeTaskId") || item.fields.contains_key("subagentChild") {
+    if claude_subagent(item) {
         record_claude(state, parent_thread_id, driver, item).await;
         return Recorded::Other;
     }
@@ -138,6 +138,12 @@ pub(crate) async fn record_child(
         return Recorded::Other;
     }
     selected
+}
+
+/// Whether `item` is a Claude subagent's (an `Agent` call's task or its child's frames), which
+/// [`record_child`] records apart from Codex's.
+pub(crate) fn claude_subagent(item: &ProviderItem) -> bool {
+    item.fields.contains_key("claudeTaskId") || item.fields.contains_key("subagentChild")
 }
 
 /// Whether `item` is what a subagent's own turn reported, which [`record_child`] records on

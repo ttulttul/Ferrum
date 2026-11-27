@@ -738,14 +738,16 @@ impl Snapshots {
         position: Option<StreamPosition>,
         read_with_more: bool,
     ) {
-        // Only a native subagent's snapshot starts a batch of what was read
-        // with it: a client acts on seeing one (a stop), and coalescing any
-        // other read costs a dry run of the thread for nothing a client does.
+        // Only a Codex native subagent's snapshot starts a batch of what was
+        // read with it: a client acts on seeing one (a stop). A Claude
+        // subagent's reports keep their own order around the parent's
+        // provider turn and thread (#386), and any other read would cost a
+        // dry run of the thread for nothing a client does.
         let takes = read_with_more
             && matches!(&event, Event::RunProvider {
                 event: ProviderEvent::TurnItem { item },
                 ..
-            } if native_subagent(item));
+            } if native_subagent(item) && !crate::native_subagents::claude_subagent(item));
         self.queued.push((event, position));
         if self.flush_at.is_none() && self.reads_first {
             self.flush_at = Some(host.turn_wait(ACP_READ_WINDOW));
