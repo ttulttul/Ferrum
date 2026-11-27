@@ -1,0 +1,11 @@
+query IssueSearch($q: String!, $cursor: String, $rows: Int!) {
+  search(query: $q, type: ISSUE, first: $rows, after: $cursor) {
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      __typename
+      ... on Issue {
+        ...IssueSearchFields
+      }
+    }
+  }
+}

@@ -21,6 +21,7 @@ impl IssueService {
 }
 
 mod linear;
+mod planning;
 mod reads;
 mod templates;
 mod trackers;
@@ -208,7 +209,7 @@ async fn run(state: &AppState, cli: &Path, op: &str, input: &Value) -> Reply {
     } else {
         "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issue(number:$number){id state stateReason}}}"
     };
-    let data = gh.graphql(query, vars).await.map_err(fail)?;
+    let data = gh.graphql(query, vars.clone()).await.map_err(fail)?;
     let issue = &data["repository"]["issue"];
     let id = issue["id"]
         .as_str()
@@ -244,31 +245,15 @@ async fn run(state: &AppState, cli: &Path, op: &str, input: &Value) -> Reply {
             .map_err(fail)?;
         }
         "setState" => {
-            let state = input["state"].as_str().unwrap_or("");
-            let reason = match state {
-                "Open" => None,
-                "Completed" => Some("completed"),
-                "Not planned" => Some("not_planned"),
-                "Duplicate" => Some("duplicate"),
-                _ => {
-                    return Err(error(
-                        op,
-                        &format!("A GitHub issue has no \"{state}\" state."),
-                    ))
-                }
-            };
-            let mut body = json!({"state":if reason.is_some(){"closed"}else{"open"}});
-            if let Some(reason) = reason {
-                if issue["state"] == "CLOSED"
-                    && !issue["stateReason"]
-                        .as_str()
-                        .is_some_and(|s| s.eq_ignore_ascii_case(reason))
-                {
-                    return Err(error(op,"GitHub cannot change why a closed issue was closed. Reopen it, then close it again."));
-                }
-                body["state_reason"] = json!(reason);
-            }
-            gh.json("PATCH", &item, Some(body)).await.map_err(fail)?;
+            return planning::set_state(
+                &gh,
+                vars,
+                issue,
+                id,
+                &item,
+                input["state"].as_str().unwrap_or(""),
+            )
+            .await
         }
         "react" => {
             if subject.is_some()
@@ -334,18 +319,22 @@ fn summary(v: &Value) -> Option<Value> {
         return None;
     }
     let number = v["number"].as_i64()?;
-    let state = match (v["state"].as_str(), v["stateReason"].as_str()) {
-        (Some("CLOSED"), Some("COMPLETED")) => {
-            json!({"category":"closed","name":"Completed","closeReason":"completed"})
+    let state = if !v["status"].is_null() {
+        planning::state(&v["status"])
+    } else {
+        match (v["state"].as_str(), v["stateReason"].as_str()) {
+            (Some("CLOSED"), Some("COMPLETED")) => {
+                json!({"category":"closed","name":"Completed","closeReason":"completed"})
+            }
+            (Some("CLOSED"), Some("NOT_PLANNED")) => {
+                json!({"category":"closed","name":"Not planned","closeReason":"not-planned"})
+            }
+            (Some("CLOSED"), Some("DUPLICATE")) => {
+                json!({"category":"closed","name":"Duplicate","closeReason":"duplicate"})
+            }
+            (Some("CLOSED"), _) => json!({"category":"closed","name":"Closed"}),
+            _ => json!({"category":"open","name":"Open"}),
         }
-        (Some("CLOSED"), Some("NOT_PLANNED")) => {
-            json!({"category":"closed","name":"Not planned","closeReason":"not-planned"})
-        }
-        (Some("CLOSED"), Some("DUPLICATE")) => {
-            json!({"category":"closed","name":"Duplicate","closeReason":"duplicate"})
-        }
-        (Some("CLOSED"), _) => json!({"category":"closed","name":"Closed"}),
-        _ => json!({"category":"open","name":"Open"}),
     };
     let labels = nodes(&v["labels"])
         .filter_map(|l| {
@@ -481,7 +470,7 @@ async fn list(state: &AppState, cli: &Path, input: &Value) -> Reply {
             if let Some(user)=input["assignee"].as_str(){query.push_str(&format!(" assignee:{}",quote(user)))}
             query.push_str(if input["sort"]=="created" {" sort:created-desc"} else {" sort:updated-desc"});
             for term in input["query"].as_str().unwrap_or("").split_whitespace(){query.push(' ');query.push_str(&quote(term))}
-            let search=gh.graphql("query($q:String!,$cursor:String,$rows:Int!){search(query:$q,type:ISSUE,first:$rows,after:$cursor){pageInfo{hasNextPage endCursor} nodes{__typename ... on Issue{number title url state stateReason createdAt updatedAt closedAt author{login avatarUrl ... on User{name}} assignees(first:20){nodes{login name avatarUrl}} labels(first:20){nodes{name color}} comments{totalCount}}}}}",json!({"q":query,"cursor":cursor,"rows":input["limit"].as_i64().unwrap_or(50).clamp(1,100)})).await?;
+            let search=planning::search(&gh,json!({"q":query,"cursor":cursor,"rows":input["limit"].as_i64().unwrap_or(50).clamp(1,100)})).await?;
             let page=search.get("search").ok_or(Failure::Invalid)?;
             for item in nodes(page).filter_map(summary) {
                 let mut row=json!({"tracker":"github","host":"github.com","scope":scope});

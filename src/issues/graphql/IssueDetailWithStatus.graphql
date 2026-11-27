@@ -1,0 +1,20 @@
+query IssueDetailWithStatus($owner: String!, $name: String!, $number: Int!) {
+  viewer {
+    login
+  }
+  repository(owner: $owner, name: $name) {
+    viewerPermission
+    planningStatuses(first: 50) {
+      nodes {
+        ...PlanningStatusFields
+      }
+    }
+    issue(number: $number) {
+      ...IssueDetailFields
+      viewerCanSetStatus
+      status {
+        ...PlanningStatusFields
+      }
+    }
+  }
+}

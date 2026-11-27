@@ -17,7 +17,6 @@ from urllib.parse import parse_qs, urlsplit
 
 from websockets.sync.client import connect
 import parity_harness as harness
-from parity_gaps import Gaps
 
 
 REPO = "example/parity"
@@ -33,6 +32,12 @@ ISSUE = {"id": "I_12", "__typename": "Issue", "number": 12, "title": "Regression
          "viewerCanUpdate": True, "viewerCanClose": True, "viewerCanReopen": True, "viewerCanSetStatus": False,
          "reactionGroups": [], "closedByPullRequestsReferences": {"pageInfo":{"hasNextPage":False,"endCursor":None},"nodes":[]},
          "timelineItems": {"nodes":[]}}
+IN_PROGRESS = {"id": "P_1", "name": "In progress",
+               "category": {"key": "started", "state": "OPEN", "stateReason": None}}
+DUPLICATE = {"id": "P_2", "name": "Already reported",
+             "category": {"key": "duplicate", "state": "CLOSED", "stateReason": "DUPLICATE"}}
+PLANNED_ISSUE = {**ISSUE, "id": "I_13", "number": 13, "url": ISSUE["url"].replace("/12", "/13")}
+
 PR = {"viewerCanUpdate":True,"viewerDidAuthor":False,"headRepository":{"viewerPermission":"WRITE"},"id": "PR_3", "__typename": "PullRequest", "number": 3, "title": "Work", "url": "https://github.com/example/parity/pull/3",
       "state": "OPEN", "isDraft": False, "author": AUTHOR, "createdAt": "2026-01-02T00:00:00Z"}
 
@@ -160,6 +165,13 @@ class Provider(BaseHTTPRequestHandler):
         else:
             self.reply(404, {"message": "Unknown fixture delete"})
 
+    def do_PATCH(self):
+        if self.path in (f"/repos/{REPO}/issues/12", f"/repos/{REPO}/issues/13"):
+            self.server.issue_state_writes.append((self.path, self.read_json()))
+            self.reply(200, {})
+        else:
+            self.reply(404, {"message": "Unknown fixture update"})
+
     def do_POST(self):
         if hasattr(self.server, "requests"):
             self.server.requests.append(f"POST {self.path}")
@@ -191,6 +203,10 @@ class Provider(BaseHTTPRequestHandler):
         elif self.path == "/graphql":
             query = data.get("query", "")
             if query.lstrip().startswith("mutation"):
+                if "setIssueStatus(" in query:
+                    self.server.issue_state_writes.append(("setIssueStatus", data["variables"]))
+                    self.reply(200, {"data": {"setIssueStatus": {"clientMutationId": None}}})
+                    return
                 if "markFileAsViewed(" in query:
                     result={}
                     args=data["variables"]
@@ -253,7 +269,13 @@ class Provider(BaseHTTPRequestHandler):
                     self.reply(422, {"errors":[{"message":"Unknown fixture mutation"}]})
                     return
             elif "search(" in query and "is:issue" in str(data.get("variables")):
-                result = {"search": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": [ISSUE]}}
+                if "legacy" in data["variables"]["q"] and "PlanningStatusFields" in query:
+                    self.reply(200, {"errors": [{"message": "Cannot query field 'status' on Issue."}]})
+                    return
+                planned = dict(PLANNED_ISSUE)
+                if "PlanningStatusFields" in query:
+                    planned["status"] = IN_PROGRESS
+                result = {"search": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": [ISSUE, planned]}}
             elif "assignableUsers(" in query and "labels(" in query:
                 result = {"repository": {"labels": {"pageInfo": {"hasNextPage": False}, "nodes": [LABEL]},
                                          "assignableUsers": {"pageInfo": {"hasNextPage": False}, "nodes": [AUTHOR]}}}
@@ -269,15 +291,15 @@ class Provider(BaseHTTPRequestHandler):
                                 "comments":{"pageInfo":{"hasNextPage":more,"endCursor":"second" if more else None},
                                             "nodes":[THREAD_COMMENT,{**THREAD_COMMENT,"isMinimized":True}] if more else []}}}
             elif "issue(number:" in query:
-                item = ISSUE
+                number = data["variables"].get("number")
+                item = dict(PLANNED_ISSUE if number == 13 else ISSUE)
                 statuses = []
-                if data["variables"].get("number") == 13:
-                    item = {**ISSUE, "id": "I_13", "number": 13, "url": ISSUE["url"].replace("/12", "/13")}
-                    if "planningStatuses(" in query:
-                        status = {"id": "P_1", "name": "In progress",
-                                  "category": {"key": "started", "state": "OPEN", "stateReason": None}}
-                        statuses = [status]
-                        item["status"] = status
+                if "planningStatuses(" in query:
+                    if number == 12:
+                        self.reply(200, {"errors": [{"message": "Unknown field 'planningStatuses' on Repository."}]})
+                        return
+                    statuses = [IN_PROGRESS, None, DUPLICATE]
+                    item["status"] = IN_PROGRESS
                 result = {"viewer": {"login": "tester"}, "repository": {"viewerPermission": "WRITE",
                           "planningStatuses": {"nodes": statuses}, "issue": item}}
             elif ("pullRequests(" in query and hasattr(self.server, "status_rows")
@@ -317,6 +339,7 @@ def github_fixture(stack, directory, handler=Provider):
     endpoint = config / "api.sock"
     host = stack.enter_context(ThreadingUnixStreamServer(str(endpoint), handler))
     host.creates, host.comments, host.pr_writes, host.reviews, host.reviewers = [], [], [], [], []
+    host.issue_state_writes = []
     host.requests = []
     host.repository = deepcopy(REPOSITORY)
     host.actions = []
@@ -384,9 +407,15 @@ def main():
             rpc("issues.comment", {**issue, "key": "12", "body": "Comment body"}),
             rpc("issues.create", {**issue, **create, "scope": "other/repo"}),
             rpc("issues.list", {"projectId": "test-project", "state": "open"}),
+            rpc("issues.list", {"projectId": "test-project", "state": "open", "query": "legacy"}),
             rpc("issues.candidates", issue),
             rpc("issues.detail", {**issue, "key": "12"}),
             rpc("issues.detail", {**issue, "key": "13"}),
+            rpc("issues.setState", {**issue, "key": "13", "state": "In progress"}),
+            rpc("issues.setState", {**issue, "key": "13", "state": "Already reported"}),
+            rpc("issues.setState", {**issue, "key": "13", "state": "Unknown"}),
+            rpc("issues.setState", {**issue, "key": "12", "state": "Completed"}),
+            rpc("issues.setState", {**issue, "key": "12", "state": "Unknown"}),
             rpc("pullRequests.preview", ref),
             rpc("pullRequests.stack", ref),
             rpc("pullRequests.stack", {**ref,"number":99}),
@@ -432,32 +461,16 @@ def main():
         cancel_stack["name"] += " cancel stack auto-merge"
         cases.append(cancel_stack)
         failures = 0
-        gaps = Gaps("github_provider_parity")
-        default_detail = None
         for case in cases:
             if "frame" in case:
                 for ws in sockets:
                     ws.send(harness.encode(case["frame"]).decode())
                 packets = [harness.recv_frame(ws, timeout=15) for ws in sockets]
                 payload = case["frame"]["payload"]
-                expected_failure = payload.get("scope") == "other/repo" or payload.get("expectedHeadSha") == "abc1234" or ("stackNumber" in payload and not case["name"].endswith(("pinned stack", "cancel stack auto-merge"))) or payload.get("threadId")=="Other"
+                expected_failure = payload.get("state") == "Unknown" or payload.get("scope") == "other/repo" or payload.get("expectedHeadSha") == "abc1234" or ("stackNumber" in payload and not case["name"].endswith(("pinned stack", "cancel stack auto-merge"))) or payload.get("threadId")=="Other"
                 exits = [json.loads(p)["exit"] for p in packets]
                 ok = packets[0] == packets[1] and all(
                     e["_tag"] == ("Failure" if expected_failure else "Success") for e in exits)
-                if case["frame"]["tag"] == "issues.detail" and ok and payload["key"] == "12":
-                    default_detail = exits[0]["value"]
-                if case["frame"]["tag"] == "issues.detail" and payload["key"] == "13":
-                    # Only the state, choices and set-state permission differ on the preview.
-                    if not ok and default_detail and all(e["_tag"] == "Success" for e in exits):
-                        original, rust = [e["value"] for e in exits]
-                        planned = {"category": "open", "name": "In progress"}
-                        expected = {**rust, "state": planned, "states": [planned],
-                                    "viewerPermissions": {**rust["viewerPermissions"], "setState": False}}
-                        if (original == expected and rust["state"] == default_detail["state"]
-                                and rust["states"] == default_detail["states"]
-                                and rust["viewerPermissions"]["setState"] is True):
-                            failures += gaps.differs("issue planning statuses")
-                            continue
                 values = [repr(v)[:5000] for v in packets]
             else:
                 ok, values = harness.check(case, projects, sockets)
@@ -467,6 +480,13 @@ def main():
                 failures += 1
                 print("\n".join(values))
         for provider in providers:
+            if provider.issue_state_writes != [
+                ("setIssueStatus", {"issueId": "I_13", "statusId": "P_1"}),
+                (f"/repos/{REPO}/issues/13", {"state": "closed", "state_reason": "duplicate"}),
+                (f"/repos/{REPO}/issues/12", {"state": "closed", "state_reason": "completed"}),
+            ]:
+                failures += 1
+                print("FAIL issue state writes", provider.issue_state_writes)
             expected_actions = [(m,None,None) for m in ("convertPullRequestToDraft","markPullRequestReadyForReview",
                 "closePullRequest","reopenPullRequest","disablePullRequestAutoMerge","revertPullRequest")]
             expected_actions.extend([("mergePullRequest","SQUASH",None)] * 2)
@@ -499,7 +519,6 @@ def main():
             if provider.reviews != [{"event":"COMMENT","body":"Reviewed","comments":[{"path":"lib.rs","side":"RIGHT","line":1,"body":"Inline remark"}]}]:
                 failures += 1
                 print("FAIL unexpected submitted review",provider.reviews)
-        failures += gaps.finish()
         harness.assert_nothing_escaped()
         print(f"{len(cases)} client comparisons and two provider write logs checked")
         return 1 if failures else 0

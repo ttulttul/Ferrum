@@ -110,23 +110,22 @@ pub(super) async fn read(
     if op == "comments" {
         vars["cursor"] = input["cursor"].clone()
     }
-    let mut data = gh
-        .graphql(
-            if op == "comments" {
-                include_str!("graphql/IssueComments.graphql")
-            } else {
-                include_str!("graphql/IssueDetail.graphql")
-            },
-            vars.clone(),
-        )
-        .await
-        .map_err(|e| failed(op, e))?;
+    let mut data = if op == "comments" {
+        gh.graphql(include_str!("graphql/IssueComments.graphql"), vars.clone())
+            .await
+    } else {
+        super::planning::detail(gh, vars.clone()).await
+    }
+    .map_err(|e| failed(op, e))?;
     let viewer = trimmed(&data["viewer"]["login"]).map(str::to_owned);
     let repo = &mut data["repository"];
     let triage = matches!(
         repo["viewerPermission"].as_str(),
         Some("ADMIN" | "WRITE" | "TRIAGE" | "MAINTAIN")
     );
+    let states: Vec<_> = nodes(&repo["planningStatuses"])
+        .map(super::planning::state)
+        .collect();
     let issue = &mut repo["issue"];
     if issue.is_null() {
         return Err(failed(op, Failure::NotFound));
@@ -142,7 +141,19 @@ pub(super) async fn read(
         .as_object_mut()
         .unwrap()
         .extend(row.as_object().unwrap().clone());
-    let permissions = json!({"setState":if issue["state"]=="CLOSED"{&issue["viewerCanReopen"]}else{&issue["viewerCanClose"]},"comment":true,"edit":issue["viewerCanUpdate"]!=false,"labels":triage,"assignees":triage});
+    let set_state = if !states.is_empty() && issue["viewerCanSetStatus"].is_boolean() {
+        &issue["viewerCanSetStatus"]
+    } else if issue["state"] == "CLOSED" {
+        &issue["viewerCanReopen"]
+    } else {
+        &issue["viewerCanClose"]
+    };
+    let states = if states.is_empty() {
+        super::planning::legacy_states()
+    } else {
+        Value::Array(states)
+    };
+    let permissions = json!({"setState":set_state,"comment":true,"edit":issue["viewerCanUpdate"]!=false,"labels":triage,"assignees":triage});
     let mut links = Vec::new();
     let mut seen = HashSet::new();
     let mut events = Vec::new();
@@ -197,7 +208,7 @@ pub(super) async fn read(
             events.push(json!({"id":id,"kind":kind,"actor":actor(&n["actor"]),"createdAt":created,"detail":detail}))
         }
     }
-    let fields = json!({"projectId":project.id,"projectTitle":project.name,"writable":writable,"capabilities":capabilities(),"viewerPermissions":permissions,"states":[{"category":"open","name":"Open"},{"category":"closed","name":"Completed","closeReason":"completed"},{"category":"closed","name":"Not planned","closeReason":"not-planned"},{"category":"closed","name":"Duplicate","closeReason":"duplicate"}],"viewer":viewer,"body":issue["body"].as_str().unwrap_or(""),"reactions":reactions(&issue["reactionGroups"],viewer.as_deref()),"comments":page["comments"],"commentsCursor":page["nextCursor"],"events":events,"linkedPullRequests":links});
+    let fields = json!({"projectId":project.id,"projectTitle":project.name,"writable":writable,"capabilities":capabilities(),"viewerPermissions":permissions,"states":states,"viewer":viewer,"body":issue["body"].as_str().unwrap_or(""),"reactions":reactions(&issue["reactionGroups"],viewer.as_deref()),"comments":page["comments"],"commentsCursor":page["nextCursor"],"events":events,"linkedPullRequests":links});
     result
         .as_object_mut()
         .unwrap()
