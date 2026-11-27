@@ -1558,6 +1558,34 @@ def live_summary(live):
     return out
 
 
+def live_content(live):
+    """What streamed in after the dispatch, record by record: a provider session's or thread's
+    statuses in order, repeats collapsed, and the status any other record ends in. A record is named by its event type, its kind (a turn item's type) and the
+    order it first streamed in among those, as the servers name some records differently (other
+    checks compare ids). Unlike `live_summary`, it ignores how the updates of different records
+    are interleaved (where a server's commit batches put them), but still sees a transition one
+    server reports and the other does not."""
+    out, names, counts = {}, {}, {}
+    for item in (live or {}).get("items", []):
+        if not item.get("dispatched") or item.get("kind") != "event":
+            continue
+        event = item["event"]
+        payload = event.get("payload") or {}
+        kind = f"{event.get('type')} {payload.get('type') or ''}".rstrip()
+        record = (kind, str(payload.get("id")))
+        if record not in names:
+            counts[kind] = counts.get(kind, 0) + 1
+            names[record] = f"{kind} #{counts[kind]}"
+        statuses = out.setdefault(names[record], [])
+        if not statuses or statuses[-1] != payload.get("status"):
+            statuses.append(payload.get("status"))
+    # A batch can combine a record's queued updates (a running item completed in the same batch
+    # streams once, completed), so other records keep only the status they end in; a provider's
+    # session and thread keep every transition.
+    return {name: statuses if name.startswith(("provider-session", "provider-thread")) else statuses[-1:]
+            for name, statuses in out.items()}
+
+
 # Codex request params that carry the thread's runtime mode.
 CODEX_POLICY_KEYS = ("approvalPolicy", "approvalsReviewer", "sandbox", "sandboxPolicy")
 # Claude Code flags that carry it.
@@ -2546,6 +2574,12 @@ def compare_turn(original, rust):
         summaries = [live_summary(side) for side in live]
         if summaries[0] != summaries[1]:
             problems["live"] = [f"original {summaries[0]}", f"rust     {summaries[1]}"]
+        # Each record's own transitions, whatever order the servers' batches put them in.
+        contents = [live_content(side) for side in live]
+        if contents[0] != contents[1]:
+            problems["live content"] = [f"{key}: original {contents[0].get(key)} rust {contents[1].get(key)}"
+                                        for key in sorted(set(contents[0]) | set(contents[1]))
+                                        if contents[0].get(key) != contents[1].get(key)]
         # The kinds of item a client applies, whatever their order and grouping.
         kinds = [sorted(set(summary)) for summary in summaries]
         if kinds[0] != kinds[1]:
