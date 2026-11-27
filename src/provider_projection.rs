@@ -401,6 +401,18 @@ impl Thread {
     }
 
     /// The ids of `run`'s provider records, when it ran a provider turn.
+    /// The runs a session detach stops: those whose provider turn still
+    /// runs. A run whose turn ended shows completed while its checkpoint and
+    /// end are recorded; the detach leaves it to finish, as the reference's
+    /// run is already over then.
+    pub(crate) fn runs_a_detach_stops(&self) -> Vec<uuid::Uuid> {
+        self.runs
+            .iter()
+            .filter(|run| run.status == "running" && !self.provider.terminals.contains_key(&run.id))
+            .map(|run| run.id)
+            .collect()
+    }
+
     /// A steering restart starts `run_id` over at `at` as its next attempt
     /// with `message_id`: the attempt that ran, and its provider turn, are
     /// superseded ([`Event::RunRestarted`](crate::Event::RunRestarted)).
@@ -3255,6 +3267,19 @@ mod tests {
             })
             .count();
         assert_eq!(interrupts, 0);
+    }
+
+    #[test]
+    fn a_detach_leaves_a_run_whose_turn_ended_to_finish() {
+        let run_id = Uuid::new_v4();
+        let mut live = running_codex_thread(run_id);
+        assert_eq!(live.runs_a_detach_stops(), [run_id]);
+        // Its turn ended; its checkpoint and end are still being recorded.
+        live.provider
+            .apply(run_id, &terminal(TurnStatus::Completed), 3);
+        assert_eq!(live.runs[0].status, "running");
+        assert_eq!(live.projection()["runs"][0]["status"], "completed");
+        assert!(live.runs_a_detach_stops().is_empty());
     }
 
     #[test]
