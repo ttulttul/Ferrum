@@ -217,8 +217,7 @@
     "live content": "Intentional difference (see the README): Rust runs a plainly read-only command line without asking in auto-accept-edits, so it streams no approval request, its node or its runtime request."
   },
   "codex native subagent wake": {
-    "live": "The child's items and turn end are now recorded as they arrive while the parent is idle, as the reference does, but the wake run (delivery message_text) still differs: the reference writes its message (message.updated, role user) with its notification, where Rust writes the notification's turn item without the message, and again when the run starts. Around it, the reference places the idle updates by timing (an idle turn item streamed at once or held for the next provider event; the child's completion before or after the wake run starts).",
-    "live content": "The reference also streams the wake message's message.updated, which Rust does not (as its live entry says)."
+    "live": "Racy: seen both matching (1 of 8 unpinned and 3 of 24 pinned local rounds) and differing (the others). The child's updates while the parent is idle and the wake run's message now stream as the reference writes them; what varies is the reference's own timing: the child's completion (its node, subagent and turn item), which arrives with its other frames, streams there before or after the wake run starts, where Rust records it as it arrives, before."
   },
   "codex native subagent stop": {
     "live": "Racy: seen both matching and differing (matched in every pinned local run, 30 and more; differed in 1 of 2 shard runs): Rust commits the parent's subagent snapshots read together in one batch before the stop's card, and the child's model after it, as the reference does when unloaded; under a shard's load the reference once also committed the child's model (subagent.updated) before the card."

@@ -125,8 +125,8 @@ fn run_status(status: &str) -> &'static str {
     }
 }
 
-/// Drops from `projection` each delegated wake's message whose run has
-/// ended, as the reference's snapshot window reads only the messages its
+/// Drops from `projection` each delegated or provider wake's message (a Codex subagent's
+/// `message_text` wake is the server's) whose run has ended, as the reference's snapshot window reads only the messages its
 /// turn items name and those of live runs.
 fn window_messages(projection: &mut Value) {
     let live: std::collections::HashSet<String> = projection["runs"]
@@ -146,7 +146,10 @@ fn window_messages(projection: &mut Value) {
             let wake = message["delegatedCompletion"].is_object()
                 || (message["role"] == "user"
                     && message["createdBy"] == "agent"
-                    && message["creationSource"] == "provider"
+                    && matches!(
+                        message["creationSource"].as_str(),
+                        Some("provider" | "server")
+                    )
                     && message["notification"].is_object());
             !wake
                 || message["runId"]
@@ -171,10 +174,24 @@ pub(crate) fn provider_continuation(message: &crate::ConversationMessage) -> boo
     message.role == NOTIFICATION_ROLE && message.creation_source.as_deref() == Some("provider")
 }
 
+/// A continuation whose text is its message (`message_text`, a Codex subagent's result that
+/// wakes its idle parent): the server's (`creationSource: "server"`), sent as the agent's
+/// message with the notification naming what woke it, which the reference records as the
+/// agent's user message too. A link request's answer, the server's as well, sends no agent
+/// message.
+pub(crate) fn server_continuation(message: &crate::ConversationMessage) -> bool {
+    message.role == NOTIFICATION_ROLE
+        && message.creation_source.as_deref() == Some("server")
+        && message
+            .wire
+            .as_ref()
+            .is_some_and(|wire| wire["createdBy"] == "agent" && wire["notification"].is_object())
+}
+
 /// A notification the reference also records as the agent's message: a
 /// delegated task's delivery or a provider's continuation.
 pub(crate) fn agent_notification(message: &crate::ConversationMessage) -> bool {
-    delegated_delivery(message) || provider_continuation(message)
+    delegated_delivery(message) || provider_continuation(message) || server_continuation(message)
 }
 
 fn message_role(role: &str) -> &'static str {
@@ -2227,6 +2244,34 @@ mod stored_tests {
 #[cfg(test)]
 mod sender_note_tests {
     use super::*;
+
+    #[test]
+    fn a_codex_subagents_wake_is_the_agents_message_and_a_link_answer_is_not() {
+        let notification = json!({"source": {"kind": "subagent"}, "outcome": "completed"});
+        let wake = crate::ConversationMessage {
+            role: NOTIFICATION_ROLE.into(),
+            creation_source: Some("server".into()),
+            notification: Some(notification.clone()),
+            wire: Some(Box::new(
+                json!({"createdBy": "agent", "creationSource": "server",
+                "notification": notification}),
+            )),
+            ..Default::default()
+        };
+        assert!(server_continuation(&wake) && agent_notification(&wake));
+        // A link request's answer starts a run the server's way too, but sends no agent message.
+        let link = crate::ConversationMessage {
+            wire: None,
+            ..wake.clone()
+        };
+        assert!(!agent_notification(&link));
+        // Once its run has ended, the snapshot window drops the wake's message.
+        let mut projection = json!({"runs": [{"id": "r2", "status": "completed"}],
+            "messages": [{"id": "m", "role": "user", "createdBy": "agent", "creationSource": "server",
+                "notification": {"outcome": "completed"}, "runId": "r2"}]});
+        window_messages(&mut projection);
+        assert_eq!(projection["messages"], json!([]));
+    }
 
     #[test]
     fn a_message_nobody_typed_says_who_sent_it() {
