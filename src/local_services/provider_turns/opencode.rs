@@ -1376,7 +1376,13 @@ impl<'a> Turn<'a> {
             "permission.replied" | "question.replied" => {
                 if let Some(native) = properties["requestID"].as_str() {
                     if let Some(id) = self.by_native.remove(native) {
-                        self.pending.remove(&id);
+                        if self
+                            .pending
+                            .remove(&id)
+                            .is_some_and(|p| p.question.is_none())
+                        {
+                            self.sink.send(super::requests::confirmed(id));
+                        }
                     }
                 }
             }
@@ -1535,6 +1541,7 @@ impl<'a> Turn<'a> {
             .unwrap_or_default();
         let kind = request_kind(permission, &tool);
         let mut open = super::requests::open(native, native, kind, &self.runtime_mode);
+        open.reports_resolution = true;
         let patterns: Vec<&str> = properties["patterns"]
             .as_array()
             .into_iter()

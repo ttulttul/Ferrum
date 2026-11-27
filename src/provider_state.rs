@@ -195,6 +195,8 @@ pub struct RequestRecord {
     pub decision: Option<String>,
     pub feedback: Option<String>,
     pub answers: Option<Value>,
+    /// The adapter has confirmed delivery of the user's answer.
+    pub confirmed: bool,
     /// When the answer could not be handed to the turn.
     pub delivery_failed_at: Option<u64>,
 }
@@ -702,6 +704,7 @@ impl ProviderState {
                     decision: None,
                     feedback: None,
                     answers: None,
+                    confirmed: false,
                     delivery_failed_at: None,
                 });
                 // A question or approval takes the next item slot, as the
@@ -721,15 +724,23 @@ impl ProviderState {
             }
             ProviderEvent::RuntimeRequestAnswered {
                 id,
+                confirmed,
                 decision,
                 feedback,
                 answers,
             } => {
-                if let Some(request) = record
-                    .requests
-                    .iter_mut()
-                    .find(|known| &known.request.id == id && known.pending())
-                {
+                if let Some(request) = record.requests.iter_mut().find(|r| &r.request.id == id) {
+                    if *confirmed {
+                        if !request.request.reports_resolution
+                            || request.confirmed
+                            || request.status == "cancelled"
+                        {
+                            return;
+                        }
+                        request.confirmed = true;
+                    } else if !request.pending() {
+                        return;
+                    }
                     request.status = "resolved";
                     request.resolved_at = Some(at);
                     request.decision = decision.clone();
@@ -1160,6 +1171,41 @@ mod tests {
 
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn an_adapter_can_confirm_an_answer_once_after_the_user_responds() {
+        let opened = json!({"type": "runtime_request.opened", "request": {
+            "id": "p", "nativeRequestId": "n", "nativeItemId": "n", "kind": "command"
+        }});
+        let answer = json!({"type": "runtime_request.answered", "id": "p", "decision": "decline"});
+        let confirm = json!({"type": "runtime_request.answered", "id": "p", "confirmed": true});
+        for reports in [false, true] {
+            let mut opened = opened.clone();
+            if reports {
+                opened["request"]["reportsResolution"] = json!(true);
+            }
+            let run = Uuid::nil();
+            let mut state = ProviderState::default();
+            for (at, event) in [
+                (1, opened),
+                (2, answer.clone()),
+                (3, confirm.clone()),
+                (4, confirm.clone()),
+            ] {
+                state.apply(run, &serde_json::from_value(event).unwrap(), at);
+            }
+            let request = &state.runs[&run].requests[0];
+            assert_eq!(request.status, "resolved");
+            assert_eq!(request.confirmed, reports);
+            if reports {
+                assert_eq!(request.resolved_at, Some(3));
+                assert_eq!(request.decision, None);
+            } else {
+                assert_eq!(request.resolved_at, Some(2));
+                assert_eq!(request.decision.as_deref(), Some("decline"));
+            }
+        }
+    }
 
     #[test]
     fn a_turn_takes_its_instance_settings_selection_and_native_thread() {

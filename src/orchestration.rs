@@ -3401,6 +3401,7 @@ async fn respond_provider_request<H: CommandHost>(
                 thread_id: thread_id.to_owned(),
                 event: crate::workspace::ProviderEvent::RuntimeRequestAnswered {
                     id: uuid.clone(),
+                    confirmed: false,
                     decision: decision.clone(),
                     feedback: feedback.clone(),
                     answers: answers.clone(),

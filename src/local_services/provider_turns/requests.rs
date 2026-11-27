@@ -95,7 +95,19 @@ pub(super) fn open(
         kind: kind.to_owned(),
         runtime_mode: runtime_mode.to_owned(),
         supports_feedback: false,
+        reports_resolution: false,
         fields: Map::new(),
+    }
+}
+
+/// The adapter settled its copy of the request after the RPC answered it.
+pub(super) fn confirmed(id: String) -> crate::workspace::ProviderEvent {
+    crate::workspace::ProviderEvent::RuntimeRequestAnswered {
+        id,
+        confirmed: true,
+        decision: None,
+        feedback: None,
+        answers: None,
     }
 }
 

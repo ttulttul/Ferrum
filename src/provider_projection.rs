@@ -2036,7 +2036,11 @@ impl Thread {
         // answered, cancelled when declined, withdrawn or expired.
         // Pi's adapter resolves its own dialogs, and Muse's adapter its
         // requests: answered is completed, however it was.
-        let own = muse || (provider::resolves_own_requests(driver) && self.opencode2().is_none());
+        // Older workspaces did not report a separate adapter resolution.
+        let adapter_resolution = provider::resolves_own_requests(driver)
+            && self.opencode2().is_none()
+            && (!open.reports_resolution || request.confirmed);
+        let own = muse || adapter_resolution;
         let done = match state.status {
             "resolved" => Some(
                 if !own && matches!(request.decision.as_deref(), Some("decline" | "cancel")) {
@@ -2069,10 +2073,9 @@ impl Thread {
             "createdAt": created,
             "resolvedAt": state.resolved_at.map(iso)
         });
-        // Pi's resolution records no decision.
-        if state.status == "resolved"
-            && !(provider::resolves_own_requests(driver) && self.opencode2().is_none())
-        {
+        // The dispatched answer carries the decision. A separate resolution
+        // from Pi or OpenCode carries the adapter's request without it.
+        if state.status == "resolved" && !adapter_resolution {
             for (key, value) in [
                 ("decision", &request.decision),
                 ("feedback", &request.feedback),
@@ -2584,6 +2587,7 @@ mod tests {
                 kind: kind.into(),
                 runtime_mode: "full-access".into(),
                 supports_feedback: false,
+                reports_resolution: false,
                 fields,
             },
         }
@@ -2685,6 +2689,7 @@ mod tests {
             run_id,
             &ProviderEvent::RuntimeRequestAnswered {
                 id: "a".into(),
+                confirmed: false,
                 decision: Some("decline".into()),
                 feedback: None,
                 answers: None,

@@ -1020,6 +1020,8 @@ fn diff_with_command(
             .iter()
             .find_map(|(_, request)| request_driver(request))
         {
+            // Pi emits the request, then its card's node and item, as on answer.
+            Some(crate::workspace::provider::PI) => Order::Answer.steps(),
             Some(crate::workspace::provider::CLAUDE_AGENT) => Order::CLAUDE_REQUEST_OPEN,
             Some(driver) if crate::workspace::provider::is_acp(driver) => Order::ACP_REQUEST_OPEN,
             _ => order.steps(),
