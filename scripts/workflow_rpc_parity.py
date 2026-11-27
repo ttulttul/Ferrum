@@ -5,7 +5,7 @@ on the Rust server, and both must answer the same.
 As in workflow_parity.py, the reference alone first builds history from a fake workflow (no
 network and no agents), and every server starts from a copy of that database, with workflows
 off, on with no run kept, and on with the copied runs. Covered: the first snapshot of
-workflows.subscribe and of workflows.counts, workflows.get (a run, one that is not there),
+workflows.subscribe and of workflows.counts, workflows.get (a run, one that is not there), workflows.about (an address, a typed identity and a miss),
 workflows.answer (a question, the same question again, a wait that asks nothing, a run that is
 not there, a choice that does not fit), workflows.resume (a paused run, one that is not there),
 workflows.cancel (with a reason, again, a parent with its child, one that is not there), and
@@ -74,6 +74,14 @@ def observe(server, mode):
         agent = McpClient(server.url, mcp_token(server, "full-access"))
         run = ids(agent) if mode == "history" else {"ask": "run-1", "wait": "run-2", "cancel-me": "run-3",
                                                       "fail": "run-4", "parent": "run-5", "child": "run-6"}
+        for label, subject in [
+            ("by address", {"subject": "https://example.invalid/tasks/42"}),
+            ("by identity", {"subject": "another address", "issue": {
+                "tracker": "github", "projectId": "project:fixture", "host": "github.com",
+                "scope": "FIXTURE/Example", "key": "42"}}),
+            ("absent", {"subject": "absent"}),
+        ]:
+            record["about " + label] = server.rpc("workflows.about", subject)
         record["get"] = server.rpc("workflows.get", {"runId": run["ask"]})
         record["get a run that is not there"] = server.rpc("workflows.get", {"runId": "run-missing"})
         answer = lambda **payload: server.rpc("workflows.answer", payload)

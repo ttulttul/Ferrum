@@ -1098,6 +1098,65 @@ fn request_error((_, message): Refused) -> Value {
     json!({"_tag": "WorkflowRequestError", "message": message})
 }
 
+/// The newest runs about an address or a typed issue or change request, and their open questions.
+pub(crate) fn about(state: &AppState, input: &Value) -> Result<Value, Value> {
+    let sql_error = |e| request_error(unavailable(e));
+    let conn = open(state).map_err(sql_error)?;
+    match mode(state, &conn) {
+        Mode::Off => return Err(request_error(invalid(OFF))),
+        Mode::Disabled => return Ok(json!({"runs":[],"questions":[]})),
+        Mode::History => {}
+    }
+    let subject = input["subject"].as_str().unwrap_or_default();
+    let identity = if let Some(issue) = input.get("issue") {
+        Some((
+            "issue",
+            json!([
+                issue["tracker"],
+                issue["host"].as_str().unwrap_or(""),
+                issue["scope"].as_str().unwrap_or("").to_lowercase(),
+                issue["key"]
+            ])
+            .to_string(),
+        ))
+    } else {
+        input.get("pullRequest").map(|pr| {
+            let mut link = pr.clone();
+            link["url"] = json!(subject);
+            let host = crate::mcp_oauth::pull_request_host(&link);
+            let repository = crate::repository_identity::canonical_repository_path(
+                pr["repository"].as_str().unwrap_or("").trim(),
+            )
+            .to_lowercase();
+            (
+                "pullRequest",
+                json!([host, repository, pr["number"]]).to_string(),
+            )
+        })
+    };
+    let (kind, key) = identity.unzip();
+    // Equal timestamps keep the address hits ahead of additional identity hits. Reading
+    // the table once deduplicates a run which matched both forms.
+    let rows = select(
+        &conn,
+        "SELECT * FROM workflow_runs
+         WHERE subject_url = ?1 OR subject_key = ?1 OR (subject_kind = ?2 AND subject_key = ?3)
+         ORDER BY started_at DESC, CASE WHEN subject_url = ?1 OR subject_key = ?1 THEN 0 ELSE 1 END,
+                  rowid DESC LIMIT 500",
+        params![subject, kind, key],
+    )
+    .map_err(sql_error)?;
+    let runs: Vec<_> = rows.iter().map(to_run).collect();
+    let ids: std::collections::HashSet<_> =
+        runs.iter().filter_map(|r| r["runId"].as_str()).collect();
+    let open: Vec<_> = questions(&conn)
+        .map_err(sql_error)?
+        .into_iter()
+        .filter(|q| q["runId"].as_str().is_some_and(|id| ids.contains(id)))
+        .collect();
+    Ok(json!({"runs":runs,"questions":open}))
+}
+
 /// `workflows.get`: a run with its steps and what it refers to.
 pub(crate) fn get_run(state: &AppState, run_id: &str) -> Result<Value, Value> {
     let conn = open(state).map_err(|e| request_error(unavailable(e)))?;
