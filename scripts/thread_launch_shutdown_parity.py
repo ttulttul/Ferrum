@@ -165,11 +165,18 @@ def one(args, credentials, case, first, second):
         with contextlib.ExitStack() as stack:
             url, cookie = managed_server(stack, shlex.split(second), root, *credentials, env=env)
             # Settled once the server's startup recovery has queued its continuations, nothing
-            # runs there, and nothing for the thread waits in the effect outbox.
+            # runs there, nothing for the thread waits in the effect outbox, and each completed
+            # run shows its checkpoint. Both servers show a run completed a moment before its
+            # checkpoint lands; the reference's capture waits in the outbox meanwhile, the Rust
+            # server's does not go through it, so only the checkpoint itself tells.
+            def checkpointed(p):
+                shown = {item.get("runId") for item in p.get("turnItems", []) if item.get("type") == "checkpoint"}
+                return all(run.get("id") in shown for run in p.get("runs", []) if run.get("status") == "completed")
+
             def done(p):
                 return (turns.startup_recorded(root, url) and p.get("runs")
                         and not any(run.get("status") in LIVE for run in p.get("runs", []))
-                        and not effects_pending(root, launched))
+                        and not effects_pending(root, launched) and checkpointed(p))
             settled = turns.wait_for(url, cookie, done, 90, thread=launched)
             if not done(settled):
                 raise RuntimeError(f"{case}: {second} did not settle the launched thread after the swap: "

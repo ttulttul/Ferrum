@@ -38,6 +38,14 @@ pub(crate) fn project_file(text: &str) -> Option<Value> {
     {
         return None;
     }
+    if let Some(layout) = obj.get("worktreeLayout") {
+        let layout = layout.as_object()?;
+        if !nonempty(layout.get("create")?, 4096)
+            || layout.get("remove").is_some_and(|v| !nonempty(v, 4096))
+        {
+            return None;
+        }
+    }
     if let Some(scripts) = obj.get("scripts") {
         let scripts = scripts.as_array()?;
         if scripts.len() > 50

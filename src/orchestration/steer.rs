@@ -247,6 +247,7 @@ pub(super) async fn steer_with<H: CommandHost>(
         // with `turnCompleted` and its EffectWorker dispatches it again.
         tracing::info!(run = %target.wire_id, "the steered turn had ended; sending its message again");
         let untaken = Event::RunProvider {
+            visible_text: None,
             run_id: target.run,
             thread_id: thread_id.to_owned(),
             event: crate::workspace::ProviderEvent::SteerUpdated {
@@ -261,4 +262,142 @@ pub(super) async fn steer_with<H: CommandHost>(
         }
     }
     Ok(sequence)
+}
+
+/// Restart `command`'s target run in place, when its provider restarts a
+/// running turn with new input (`supportsSteeringByInterruptRestart`): the
+/// run starts over as its next attempt (`interrupt_restart`), its turn is
+/// interrupted, and the message runs on the same run once that turn ends.
+/// `None` when the run cannot be restarted that way: it then stops and the
+/// message runs next, as for Claude.
+pub(super) async fn restart_in_place<H: CommandHost>(
+    state: &Arc<H>,
+    receipt: &CommandReceipt,
+    thread_id: &str,
+    command: &Value,
+) -> anyhow::Result<Option<u64>> {
+    let target_id = command["dispatchMode"]["targetRunId"]
+        .as_str()
+        .unwrap_or_default();
+    let (run, steer, cwd) = {
+        let store = state.store.read().await;
+        let Some(thread) = store.threads.get(thread_id) else {
+            return Ok(None);
+        };
+        let Some(run) = thread
+            .runs
+            .iter()
+            .find(|run| run.wire_id() == target_id && run.status == "running")
+        else {
+            return Ok(None);
+        };
+        let Some(ids) = thread.provider_run_ids(run) else {
+            return Ok(None);
+        };
+        let capabilities: Value =
+            serde_json::from_str(include_str!("../provider_capabilities.json")).unwrap_or_default();
+        let turns = &capabilities[ids.driver.as_str()]["turns"];
+        let turn_running = thread
+            .provider
+            .runs
+            .get(&run.id)
+            .is_some_and(|record| record.turn_started)
+            && !thread.provider.terminals.contains_key(&run.id);
+        let ending = thread
+            .provider
+            .superseded
+            .get(&run.id)
+            .and_then(|attempts| attempts.last())
+            .is_some_and(|attempt| attempt.open);
+        if turns["supportsInterrupt"] != true
+            || turns["supportsSteeringByInterruptRestart"] != true
+            || !crate::workspace::provider::runs_turns(&ids.driver)
+            || !thread.provider.session_live()
+            || !turn_running
+            || ending
+        {
+            return Ok(None);
+        }
+        let run_id = run.wire_id();
+        let index = thread.runs.iter().position(|r| r.id == run.id).unwrap_or(0);
+        let after = thread
+            .provider_records()
+            .items
+            .iter()
+            .filter(|(i, _)| *i == index)
+            .count();
+        let after_message = thread.projection()["messages"]
+            .as_array()
+            .and_then(|messages| messages.last())
+            .map(|message| message["id"].clone())
+            .unwrap_or(Value::Null);
+        let (_, next_root) =
+            crate::provider_projection::attempt_ids(&run_id, run.steering_restarts + 2);
+        let steer = json!({
+            "runId": run_id,
+            crate::thread_projection::LINK_CARD_POSITION: after,
+            "nodeId": next_root,
+            "providerThreadId": ids.provider_thread,
+            "providerTurnId": null,
+            "afterMessageId": after_message,
+        });
+        (run.clone(), steer, thread.cwd.clone())
+    };
+    let message_id = command["messageId"].as_str().unwrap_or_default().to_owned();
+    let text = command["text"].as_str().unwrap_or_default().to_owned();
+    let mut sender = json!({});
+    for key in [
+        "createdBy",
+        "creationSource",
+        "scheduledTaskId",
+        "senderThreadId",
+        "linkedSender",
+    ] {
+        if !command[key].is_null() {
+            sender[key] = command[key].clone();
+        }
+    }
+    let provider_text = crate::thread_projection::with_message_sender_note(&sender, &text);
+    state.steering_restarts.lock().await.insert(
+        run.id,
+        crate::control_state::SteeringRestart {
+            cwd,
+            text: provider_text,
+        },
+    );
+    // The new attempt first, then its message (`interrupt_restart`).
+    let sequence = state
+        .commit_receipted(
+            Event::RunRestarted {
+                run_id: run.id,
+                thread_id: thread_id.to_owned(),
+                message_id: message_id.clone(),
+            },
+            Some(receipt.clone()),
+        )
+        .await?
+        .id;
+    let message = ConversationMessage {
+        id: message_id,
+        role: "user".into(),
+        content: text,
+        created_at: crate::now(),
+        creation_source: command["creationSource"]
+            .as_str()
+            .filter(|source| *source != "web")
+            .map(str::to_owned),
+        steer: Some(Box::new(steer)),
+        ..Default::default()
+    };
+    state
+        .commit(Event::MessageAdded {
+            thread_id: thread_id.to_owned(),
+            message,
+        })
+        .await?;
+    // The turn is interrupted; its end starts the next attempt.
+    if let Some(cancel) = state.cancellations().lock().await.remove(&run.id) {
+        let _ = cancel.send(());
+    }
+    Ok(Some(sequence))
 }

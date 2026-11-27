@@ -1823,8 +1823,22 @@ impl crate::orchestration::CommandHost for PlaneCommands {
 }
 
 impl crate::turn::TurnHost for ControlPlane {
+    fn turn_settings(&self) -> anyhow::Result<serde_json::Value> {
+        self.settings.internal()
+    }
     fn workspace(&self) -> &dyn Workspace {
         &self.host.workspace
+    }
+    fn restart_turn(self: Arc<Self>, run: crate::Run, cwd: String, text: String) {
+        let runtime = self.host.runtime.clone();
+        runtime.spawn(Box::pin(async move {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            self.cancellations.lock().await.insert(run.id, tx);
+            match self.turn_spec(&run, cwd, text).await {
+                Ok(spec) => crate::turn::launch(self, run, spec, rx).await,
+                Err(error) => crate::turn::fail(&*self, &run, error.into()).await,
+            }
+        }));
     }
     fn turn_wait(&self, duration: std::time::Duration) -> crate::runtime::Wait {
         self.host.runtime.sleep(duration)

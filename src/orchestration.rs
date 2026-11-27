@@ -1286,6 +1286,11 @@ async fn apply_command<H: CommandHost>(
                                 .any(|run| run.wire_id() == target && run.status == "running")
                         });
                 if running {
+                    if let Some(sequence) =
+                        steer::restart_in_place(&state, receipt, thread_id, command).await?
+                    {
+                        return Ok(sequence);
+                    }
                     restart_target = Some(target.to_owned());
                     queue_steer = true;
                 }
@@ -3391,6 +3396,7 @@ async fn respond_provider_request<H: CommandHost>(
     let sequence = state
         .commit_receipted(
             Event::RunProvider {
+                visible_text: None,
                 run_id,
                 thread_id: thread_id.to_owned(),
                 event: crate::workspace::ProviderEvent::RuntimeRequestAnswered {
@@ -3421,6 +3427,7 @@ async fn respond_provider_request<H: CommandHost>(
     if !delivered {
         let _ = state
             .commit(Event::RunProvider {
+                visible_text: None,
                 run_id,
                 thread_id: thread_id.to_owned(),
                 event: crate::workspace::ProviderEvent::RuntimeRequestDeliveryFailed { id: uuid },
