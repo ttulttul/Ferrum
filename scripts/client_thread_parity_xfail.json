@@ -121,20 +121,16 @@
     "live": "Racy: matched in 1 of 10 pinned local runs and in the CI run on #384. In the nine differing runs the reference reported the session ready before the interrupted tool node and command item. Ferrum reported it after both."
   },
   "opencode2 approval": {
-    "live": "The reference reports the session waiting while the request is open and running again when answered. Ferrum also publishes intermediate assistant text that the reference can combine with its completed snapshot.",
-    "live content": "The reference's adapter reports its provider session waiting while the request is open and running again once it is answered (ready, running, waiting, running, ready); Rust's session record has no waiting status and goes from running to ready."
+    "live": "Only batch placement remains (\"live content\" matches): the reference's commit batch writes its provider session's latest state in whichever batch commits next, so it streams the session waiting right after the turn starts, before the request's records, and ready right after the request resolves, before the command and the final assistant message; Rust streams each where it happens. Ferrum also publishes intermediate assistant text that the reference can combine with its completed snapshot."
   },
   "opencode2 approval declined": {
-    "live": "The reference reports the session waiting while the request is open and running again when answered. Ferrum also publishes intermediate assistant text that the reference can combine with its completed snapshot.",
-    "live content": "The reference's adapter reports its provider session waiting while the request is open and running again once it is answered (ready, running, waiting, running, ready); Rust's session record has no waiting status and goes from running to ready."
+    "live": "Only batch placement remains (\"live content\" matches): the reference's commit batch writes its provider session's latest state in whichever batch commits next, so it streams the session waiting right after the turn starts, before the request's records, and ready right after the request resolves, before the command and the final assistant message; Rust streams each where it happens. Ferrum also publishes intermediate assistant text that the reference can combine with its completed snapshot."
   },
   "opencode2 approval for session": {
-    "live": "The reference reports the session waiting while the request is open and running again when answered. Ferrum also publishes intermediate assistant text that the reference can combine with its completed snapshot.",
-    "live content": "The reference's adapter reports its provider session waiting while the request is open and running again once it is answered (ready, running, waiting, running, ready); Rust's session record has no waiting status and goes from running to ready."
+    "live": "Only batch placement remains (\"live content\" matches): the reference's commit batch writes its provider session's latest state in whichever batch commits next, so it streams the session waiting right after the turn starts, before the request's records, and ready right after the request resolves, before the command and the final assistant message; Rust streams each where it happens. Ferrum also publishes intermediate assistant text that the reference can combine with its completed snapshot."
   },
   "opencode2 question": {
-    "live": "The reference reports the session waiting while the request is open and running again when answered. Ferrum also publishes intermediate assistant text that the reference can combine with its completed snapshot.",
-    "live content": "The reference's adapter reports its provider session waiting while the request is open and running again once it is answered (ready, running, waiting, running, ready); Rust's session record has no waiting status and goes from running to ready."
+    "live": "Only batch placement remains (\"live content\" matches): the reference's commit batch writes its provider session's latest state in whichever batch commits next, so it streams the session waiting right after the turn starts, before the request's records, and ready right after the request resolves, before the command and the final assistant message; Rust streams each where it happens. Ferrum also publishes intermediate assistant text that the reference can combine with its completed snapshot."
   },
   "opencode2 steer": {
     "live": "In all 10 pinned runs the reference reported the session ready before the final assistant node, message and turn item. Ferrum reported it after those three updates."

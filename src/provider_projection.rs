@@ -1304,6 +1304,9 @@ impl Thread {
                     && run.restart_cut.is_none()
                     && !self.provider.terminals.contains_key(&run.id)
             });
+        // OpenCode 2 reports its session waiting while a request of the
+        // turn is open, and running again once none is (`setSessionStatus`).
+        let waiting = latest.is_some_and(|(_, record)| record.requests.iter().any(|r| r.pending()));
         let capabilities: Value =
             serde_json::from_str(include_str!("provider_capabilities.json")).unwrap_or_default();
         let capabilities = match opencode2 {
@@ -1346,6 +1349,8 @@ impl Thread {
                 "error"
             } else if stopped.is_some() {
                 "stopped"
+            } else if turn_running && opencode2.is_some() && waiting {
+                "waiting"
             } else if turn_running {
                 "running"
             } else {
@@ -3490,5 +3495,61 @@ mod tests {
             projection["providerTurns"][0]["nativeTurnRef"]["nativeId"],
             "msg_t3_turn_ses_1:a"
         );
+    }
+
+    #[test]
+    fn an_opencode2_session_waits_while_a_request_is_open() {
+        let run_id = Uuid::new_v4();
+        let mut live = thread(
+            serde_json::from_value(json!({
+                "id": run_id, "thread_id": "t1", "provider": "opencode", "status": "running",
+                "started_at": 1, "finished_at": null, "error": null, "user_message_id": null,
+                "driver": "opencode"
+            }))
+            .unwrap(),
+        );
+        let status = |live: &Thread| live.projection()["providerSessions"][0]["status"].clone();
+        for event in [
+            ProviderEvent::ProviderThread {
+                driver: "opencode".into(),
+                native_thread_id: "ses_1".into(),
+                resumed: false,
+                model: None,
+                opencode2: Some(Box::new(crate::workspace::provider::OpenCode2Thread {
+                    version: "2.2.6".into(),
+                    model_selection: json!({"instanceId": "opencode", "model": "a/m"}),
+                })),
+                native_title: None,
+                native_updated_at: None,
+                context_usage: None,
+                session_started: None,
+            },
+            ProviderEvent::ProviderTurn {
+                native_turn_id: Some("ses_1:attempt:a".into()),
+                native_turn_ref: None,
+                conversation_head: None,
+                status: TurnStatus::Running,
+                model: None,
+                session: None,
+                history_injected: false,
+            },
+        ] {
+            live.provider.apply(run_id, &event, 2);
+        }
+        assert_eq!(status(&live), "running");
+        live.provider.apply(run_id, &opened("perm-1", "command"), 3);
+        assert_eq!(status(&live), "waiting");
+        live.provider.apply(
+            run_id,
+            &ProviderEvent::RuntimeRequestAnswered {
+                id: "perm-1".into(),
+                confirmed: false,
+                decision: Some("accept".into()),
+                feedback: None,
+                answers: None,
+            },
+            4,
+        );
+        assert_eq!(status(&live), "running");
     }
 }
