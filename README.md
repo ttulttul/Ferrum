@@ -110,7 +110,7 @@ Parity is tested by running the original TypeScript server and the Rust server s
 | Live provider turns | 239 provider scenarios; 86 checks expected to fail, 28 of them races ([xfail](scripts/client_thread_parity_xfail.json)) |
 | Shared home / server switch | 0 expected failures ([xfail](scripts/shared_store_parity_xfail.json)) |
 | Provider status ([suite](scripts/provider_status_parity.py)) | 11 scenarios lack the OpenCode 2 model catalog event subscription ([xfail](scripts/provider_status_parity_xfail.json)) |
-| Other suites | Issue detail lacks repository planning statuses, and the standalone relay lacks configured account deletion ([expected failures](scripts/parity_gaps.json)) |
+| Other suites | The standalone relay lacks configured account deletion ([expected failure](scripts/parity_gaps.json)) |
 | Agent tools ([checklist](docs/agent-tools.md#checklist)) | 94 of 94 served |
 
 A suite fails on any unlisted difference, and on any listed expected failure that starts to match.

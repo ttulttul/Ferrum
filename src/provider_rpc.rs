@@ -282,17 +282,36 @@ impl<'a> Github<'a> {
         serde_json::from_slice(&data).map_err(|_| Failure::Invalid)
     }
     pub async fn graphql(&self, query: &str, variables: Value) -> Result<Value, Failure> {
-        let response = self
-            .json(
+        self.graphql_with_response(query, variables)
+            .await
+            .map_err(|e| e.kind)
+    }
+
+    pub async fn graphql_with_response(
+        &self,
+        query: &str,
+        variables: Value,
+    ) -> Result<Value, RequestError> {
+        let bytes = self
+            .request_with_response(
                 "POST",
                 "graphql",
+                "application/vnd.github+json",
                 Some(json!({"query":query,"variables":variables})),
             )
             .await?;
+        let response: Value = serde_json::from_slice(&bytes).map_err(|_| Failure::Invalid)?;
         if response["errors"].is_array() {
-            return Err(Failure::Refused);
+            return Err(RequestError {
+                kind: Failure::Refused,
+                http_status: None,
+                response: Some(response),
+            });
         }
-        response.get("data").cloned().ok_or(Failure::Invalid)
+        response
+            .get("data")
+            .cloned()
+            .ok_or_else(|| Failure::Invalid.into())
     }
 }
 
