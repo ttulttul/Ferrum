@@ -556,12 +556,7 @@ pub(crate) async fn detach_session<H: CommandHost>(
         let Some(thread) = store.threads.get(thread_id) else {
             return Ok(());
         };
-        let run_ids: Vec<Uuid> = thread
-            .runs
-            .iter()
-            .filter(|run| run.status == "running")
-            .map(|run| run.id)
-            .collect();
+        let run_ids = thread.runs_a_detach_stops();
         let row = thread.stored_row();
         let instance = row["modelSelection"]["instanceId"]
             .as_str()
