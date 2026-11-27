@@ -141,7 +141,7 @@ pub fn descriptor_with_link_routes(
     if link_routes {
         capability!("issueTrackerAccounts", true);
     }
-    json!({"environmentId":environment_id,"label":label,"platform":platform,"serverVersion":"0.1.12","orchestrationProtocolVersion":2,"databaseMigration":DATABASE_MIGRATION,"capabilities":capabilities})
+    json!({"environmentId":environment_id,"label":label,"platform":platform,"serverVersion":"0.1.13","orchestrationProtocolVersion":2,"databaseMigration":DATABASE_MIGRATION,"capabilities":capabilities})
 }
 
 pub(crate) fn project_shell(row: &Value) -> Value {
