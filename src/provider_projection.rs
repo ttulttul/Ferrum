@@ -2423,7 +2423,14 @@ impl Thread {
         let cancelled_at = cut.filter(|_| status == "cancelled" && item.status != "cancelled");
         let updated = iso(cancelled_at.unwrap_or(record.updated_at));
         let open_tool = item.is_tool_call() && matches!(status.as_str(), "pending" | "waiting");
-        let completed = (!running && !open_tool).then(|| updated.clone());
+        // A native subagent keeps the time it ended through later updates
+        // (`emitSubagentTaskUpdate`: `prior.completedAt ?? now`).
+        let settled = (item.kind == "subagent"
+            && item.fields.get("origin") == Some(&json!("provider_native")))
+        .then_some(record.settled_at)
+        .flatten();
+        let completed =
+            (!running && !open_tool).then(|| settled.map(iso).unwrap_or_else(|| updated.clone()));
         let mut row = Map::new();
         for (key, value) in [
             ("id", json!(item_id("turn-item", driver, native))),

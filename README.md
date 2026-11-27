@@ -107,7 +107,7 @@ Parity is tested by running the original TypeScript server and the Rust server s
 | --- | --- |
 | CI parity suites | 65 suites across 13 shards on every code change (plus twice nightly); 6 more run on their own |
 | Client RPC ([cases](scripts/client_rpc_cases.json)) | 260 client steps and 18 raw RPC comparisons; 0 expected failures ([xfail](scripts/client_rpc_parity_xfail.json)) |
-| Live provider turns | 240 provider scenarios; 82 checks expected to fail, 29 of them races ([xfail](scripts/client_thread_parity_xfail.json)) |
+| Live provider turns | 240 provider scenarios; 81 checks expected to fail, 29 of them races ([xfail](scripts/client_thread_parity_xfail.json)) |
 | Shared home / server switch | 0 expected failures ([xfail](scripts/shared_store_parity_xfail.json)) |
 | Provider status ([suite](scripts/provider_status_parity.py)) | 11 scenarios lack the OpenCode 2 model catalog event subscription ([xfail](scripts/provider_status_parity_xfail.json)) |
 | Other suites | 0 known differences |
@@ -169,7 +169,7 @@ Based on `main` and the parity test suites:
 - **Kiro extras:** Sub-agents as child threads, `/compact` (`_kiro/session/compact`), `session/fork`, native turn IDs, T3 MCP tool names on `@t3-code/<tool>` calls, slash commands and pushed options as snapshots, `steering_injected` wait/follow-up, refusing steers with attachments, and leaving the turn running on Stop timeout are not ported yet.
 - **fx extras:** MCP over ACP for fx 0.0.13/0.0.14 (Rust uses the stdio bridge), `subagent` calls as child threads, interrupt-and-restart steering (Rust queues), distinguishing cancelled vs. failed tool calls after Stop, and form elicitation are not ported yet.
 - **Muse Code extras:** Subagents/workflows as child threads, wake turns and continuations, joined turns, `/compact`, session history reads, account usage windows (`usage/changed`), todo lists, provider retry rows, user-input questions, workflow child approvals, image steering, extra workspace roots, agent feedback instructions, and non-image attachment path text are not ported yet.
-- **Codex native subagents:** Subagents get their own child threads, wake their parent on late completion, and stop when the parent is stopped, but the parent's live stream can group or order a few subagent updates differently from the original's commit batches (around a stop, and the child's model), and late child updates arrive with the wake run.
+- **Codex native subagents:** Subagents get their own child threads, wake their parent on late completion, and stop when the parent is stopped, but the parent's live stream can order a few subagent updates differently from the original around a stop, and late child updates arrive with the wake run.
 - **Claude wakes:** A background subagent that finishes while Claude is idle wakes it with a run naming the subagent (as background commands and Monitor events do); workflow wakes do not yet report what finished, and `pendingBackgroundTasks` lists only background commands and monitors.
 - **Steering extras:** Steering with model changes or attachments still differs; Rust also lacks the "delivery not confirmed" notice, foreground subagent handling during a Claude steer, and follow-up turns when a provider refuses a steer.
 - **Titles:** Cursor and Muse Code cannot title threads yet; custom title generators, images in OpenCode title prompts, forked-history titles, and Antigravity temp-folder cleanup / sign-in waits are missing.

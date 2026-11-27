@@ -218,6 +218,8 @@ pub struct ItemRecord {
     /// Streamed text recorded while still held, not shown until the item's
     /// next shown update.
     pub held_text: String,
+    /// When the item last left `running`: a settled item's later updates keep it.
+    pub settled_at: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -568,15 +570,28 @@ impl ProviderState {
                             let mut item = item.clone();
                             item.fields.remove("model");
                             item.fields.remove("reasoningEffort");
+                            // Where an update came from is no change of the item.
+                            item.fields.remove("subagentUpdate");
                             item
                         };
+                        let selection = |item: &ProviderItem| {
+                            (
+                                item.fields.get("model").cloned(),
+                                item.fields.get("reasoningEffort").cloned(),
+                            )
+                        };
                         let selection_only = item.kind == "subagent"
-                            && known.item != *item
+                            && selection(&known.item) != selection(item)
                             && without_selection(&known.item) == without_selection(item);
                         let text_held = visible_text.is_some()
                             && visible_text
                                 == known.visible_text.as_ref().map(|(text, _)| text.as_str());
                         known.visible_text = visible_text.map(|text| (text.to_owned(), at));
+                        if item.status == "running" {
+                            known.settled_at = None;
+                        } else if known.settled_at.is_none() {
+                            known.settled_at = Some(at);
+                        }
                         known.item = item.clone();
                         if !text_held && !selection_only {
                             known.updated_at = at;
@@ -592,6 +607,7 @@ impl ProviderState {
                         first_at: at,
                         updated_at: at,
                         held_text: String::new(),
+                        settled_at: (item.status != "running").then_some(at),
                     }),
                 }
             }
@@ -739,6 +755,7 @@ impl ProviderState {
                     first_at: at,
                     updated_at: at,
                     held_text: String::new(),
+                    settled_at: None,
                 });
             }
             ProviderEvent::RuntimeRequestAnswered {
@@ -784,6 +801,7 @@ impl ProviderState {
                         first_at: at,
                         updated_at: at,
                         held_text: String::new(),
+                        settled_at: Some(at),
                     });
                 }
             }
@@ -1227,6 +1245,25 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn a_settled_item_keeps_when_it_ended_through_later_updates() {
+        let mut state = ProviderState::default();
+        let run = Uuid::nil();
+        let item = |status: &str| ProviderEvent::TurnItem {
+            item: ProviderItem::new("s", "subagent", status),
+        };
+        state.apply(run, &item("running"), 1);
+        state.apply(run, &item("completed"), 2);
+        state.apply(run, &item("completed"), 3);
+        let settled = |state: &ProviderState| state.runs[&run].items[0].settled_at;
+        assert_eq!(settled(&state), Some(2));
+        // Running again, it ends anew.
+        state.apply(run, &item("running"), 4);
+        assert_eq!(settled(&state), None);
+        state.apply(run, &item("completed"), 5);
+        assert_eq!(settled(&state), Some(5));
+    }
     use serde_json::json;
 
     #[test]
