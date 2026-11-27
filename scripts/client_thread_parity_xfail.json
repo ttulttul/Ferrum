@@ -132,7 +132,7 @@
     "live": "The reference reports the session waiting while the request is open and running again when answered. Ferrum also publishes intermediate assistant text that the reference can combine with its completed snapshot."
   },
   "opencode2 steer": {
-    "live": "Ferrum publishes a running assistant message and item that the reference can combine with their completed snapshots."
+    "live": "In all 10 pinned runs the reference reported the session ready before the final assistant node, message and turn item. Ferrum reported it after those three updates."
   },
   "opencode2 failed turn": {
     "live": "The reference can publish the ready session between turn admission and the active-thread report. Ferrum publishes it with the failed turn."
