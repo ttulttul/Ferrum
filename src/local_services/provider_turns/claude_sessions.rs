@@ -356,7 +356,12 @@ async fn read_idle(
                         cli.background.observe_idle(message);
                         // A background subagent's own message is recorded as it arrives, as
                         // the reference's adapter routes it, not kept for the wake turn.
-                        if let Some(items) = super::claude::child_items(&mut cli.subagents, message) {
+                        if let Some(mut items) =
+                            super::claude::child_items(&mut cli.subagents, message)
+                        {
+                            // The child's own records first, then its subagent, as the
+                            // reference writes the child's message before its parent's row.
+                            items.sort_by_key(|item| !item.fields.contains_key("subagentChild"));
                             for item in items {
                                 reporter.record(ProviderEvent::TurnItem { item });
                             }

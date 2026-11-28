@@ -451,7 +451,9 @@ impl AppServer {
                 } else {
                     super::codex::child_item(subagents, thread, method == "item/completed", params)
                 };
-                for item in item.into_iter().chain(changed) {
+                // The parent's subagent first, as the reference reports the child's progress
+                // before it writes the child's item.
+                for item in changed.into_iter().chain(item) {
                     idle.push(crate::workspace::provider::ProviderIdleEvent {
                         app_thread_id: orphan.app_thread.clone(),
                         event: crate::workspace::ProviderEvent::TurnItem { item },

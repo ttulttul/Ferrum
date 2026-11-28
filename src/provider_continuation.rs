@@ -65,6 +65,10 @@ pub(crate) async fn run<H: CommandHost + 'static>(
     }
 }
 
+/// How long an idle stream's batch is busy after it commits (the reference's provider commit
+/// batch window, as `turn.rs`'s).
+const IDLE_BATCH_WINDOW: std::time::Duration = std::time::Duration::from_millis(20);
+
 /// Record what idle provider CLIs report on their threads' latest runs, as it arrives, as the
 /// reference's adapter writes an idle session's events: a background subagent's child
 /// answering updates the subagent of the run that started it, and its child thread.
@@ -72,6 +76,10 @@ pub(crate) async fn record_idle<H: CommandHost + 'static>(
     state: Arc<H>,
     mut events: mpsc::UnboundedReceiver<ProviderIdleEvent>,
 ) {
+    // Each thread's idle stream, as the reference's provider commit batch takes it: an idle
+    // batch commits what comes first at once and is busy for its window; what comes
+    // meanwhile has its turn item updates held for the thread's next provider event.
+    let mut busy_until: HashMap<String, std::time::Instant> = HashMap::new();
     while let Some(idle) = events.recv().await {
         // In order with the thread's continuations.
         let lock = thread_lock(&idle.app_thread_id);
@@ -107,7 +115,17 @@ pub(crate) async fn record_idle<H: CommandHost + 'static>(
             visible_text: None,
             position: None,
         };
-        if let Err(error) = state.commit_idle(event).await {
+        let now = std::time::Instant::now();
+        let busy = busy_until
+            .get(&idle.app_thread_id)
+            .is_some_and(|until| now < *until);
+        let committed = if busy {
+            state.commit_idle(event).await
+        } else {
+            busy_until.insert(idle.app_thread_id.clone(), now + IDLE_BATCH_WINDOW);
+            state.commit(event).await
+        };
+        if let Err(error) = committed {
             tracing::warn!(%error, thread = %idle.app_thread_id, "failed to record an idle provider event");
         }
     }
