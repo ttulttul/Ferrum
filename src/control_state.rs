@@ -304,6 +304,8 @@ impl ControlState {
     /// `turn-item.updated`, `plan.updated`) as `type:id` keys in order, and
     /// how many live events it sends in all.
     pub(crate) async fn dry_run(&self, events: &[Event]) -> Vec<(Vec<String>, usize)> {
+        let _dry = crate::commit_timing::phase("dry run");
+        let phase = crate::commit_timing::phase("dry run: clone");
         let store = self.store.read().await;
         let mut scratch = Store::default();
         for event in events {
@@ -316,6 +318,7 @@ impl ControlState {
             }
         }
         drop(store);
+        drop(phase);
         for event in events {
             // As a commit does; a thread that cannot be read fails below.
             let _ = crate::shared_store::hydrate_touched(&scratch, event);
@@ -341,6 +344,7 @@ impl ControlState {
                 };
                 // A thread read from the shared database projects its stored
                 // records, which a commit plans along with it.
+                let phase = crate::commit_timing::phase("dry run: plan");
                 let stored_after = if scratch
                     .threads
                     .values()
@@ -350,13 +354,17 @@ impl ControlState {
                 } else {
                     Vec::new()
                 };
+                drop(phase);
+                let phase = crate::commit_timing::phase("dry run: live events");
                 let items = thread_events(&scratch, &record, &stored_after, &[])
                     .and_then(|events| events.items)
                     .unwrap_or_default();
+                drop(phase);
+                let _phase = crate::commit_timing::phase("dry run: apply");
                 scratch.apply_record(&record);
                 for (thread_id, stored) in stored_after {
                     if let Some(thread) = scratch.threads.get_mut(&thread_id) {
-                        stored.install(thread);
+                        stored.install_layered(thread);
                     }
                 }
                 (items.iter().filter_map(snapshot_key).collect(), items.len())

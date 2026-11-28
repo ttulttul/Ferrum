@@ -1118,6 +1118,166 @@ async fn commit_cost_of_deltas_on_a_long_thread() {
     }
 }
 
+/// A dry run of a batch on a thread read from the database predicts what
+/// committing the batch streams, event by event, with each later event planned
+/// over what the earlier ones changed (`Stored::layered`, no copy of the
+/// thread).
+#[tokio::test(flavor = "current_thread")]
+async fn dry_run_predicts_the_batch_on_a_stored_thread() {
+    let (home, conn, id) = super::lazy_tests::seeded_large(12, 40, 256);
+    let host = host(home.path(), &conn);
+    let _live = host.control.events.subscribe();
+    let _shell = host.control.shell_events.subscribe();
+    dispatch(
+        &host,
+        json!({"type": "message.dispatch", "commandId": "c:dry", "threadId": id, "messageId": "message:dry",
+        "text": "Run tools", "attachments": [], "createdBy": "user", "creationSource": "web"}),
+    )
+    .await;
+    let run = host.store_now().threads[&id].runs.last().unwrap().id;
+    let item = |name: &str, kind: &str, status: &str, text: &str| crate::Event::RunProvider {
+        visible_text: None,
+        run_id: run,
+        thread_id: id.clone(),
+        event: crate::workspace::ProviderEvent::TurnItem {
+            item: crate::workspace::provider::ProviderItem::new(name, kind, status)
+                .with("command", "ls")
+                .with("text", text),
+        },
+        position: None,
+    };
+    let key = |item: &Value| {
+        let event = if item["event"].is_object() {
+            &item["event"]
+        } else {
+            item
+        };
+        format!(
+            "{}:{}",
+            event["type"].as_str().unwrap_or_default(),
+            event["payload"]["id"].as_str().unwrap_or_default()
+        )
+    };
+    let batches = vec![
+        // A command's start and end, read together.
+        vec![
+            item("a", "command_execution", "running", ""),
+            item("a", "command_execution", "completed", ""),
+        ],
+        // Two commands, then the first again.
+        vec![
+            item("b", "command_execution", "running", ""),
+            item("c", "command_execution", "running", ""),
+            item("b", "command_execution", "completed", ""),
+        ],
+        // An answer growing, then a command it started, then the answer again.
+        vec![
+            item("d", "assistant_message", "running", "Hel"),
+            item("e", "command_execution", "running", ""),
+            item("d", "assistant_message", "running", "Hello"),
+            item("d", "assistant_message", "completed", "Hello there"),
+        ],
+    ];
+    for events in batches {
+        let predicted = host.control.dry_run(&events).await;
+        let mut streamed = Vec::new();
+        for event in events {
+            let record = host.commit(event).await.unwrap();
+            let items = record
+                .thread_events
+                .as_ref()
+                .and_then(|events| events.items.clone())
+                .unwrap_or_default();
+            let snapshots: Vec<String> = items
+                .iter()
+                .map(key)
+                .filter(|k| {
+                    [
+                        "node.updated:",
+                        "message.updated:",
+                        "turn-item.updated:",
+                        "plan.updated:",
+                    ]
+                    .iter()
+                    .any(|kind| k.starts_with(kind))
+                })
+                .collect();
+            streamed.push((snapshots, items.len()));
+        }
+        assert_eq!(predicted, streamed);
+    }
+    store_matches_database(&host, &conn, &id);
+}
+
+/// What predicting a snapshot batch's live events costs on a long thread
+/// (`ControlState::dry_run`, which the snapshot worker runs to coalesce a
+/// batch), against committing the same events. Run with
+/// `cargo test --release --lib dry_run_cost -- --ignored --nocapture`.
+#[tokio::test(flavor = "current_thread")]
+#[ignore]
+async fn dry_run_cost_on_a_long_thread() {
+    let (home, conn, id) = super::lazy_tests::seeded_large(12, 2000, 2048);
+    let host = host(home.path(), &conn);
+    let _live = host.control.events.subscribe();
+    let _shell = host.control.shell_events.subscribe();
+    dispatch(
+        &host,
+        json!({"type": "message.dispatch", "commandId": "c:bench", "threadId": id, "messageId": "message:bench",
+        "text": "Run tools", "attachments": [], "createdBy": "user", "creationSource": "web"}),
+    )
+    .await;
+    let run = host.store_now().threads[&id].runs.last().unwrap().id;
+    let size = crate::wire_json::compact(&host.store_now().threads[&id].projection()).len();
+    let tool = |name: String, status: &str| crate::Event::RunProvider {
+        visible_text: None,
+        run_id: run,
+        thread_id: id.clone(),
+        event: crate::workspace::ProviderEvent::TurnItem {
+            item: crate::workspace::provider::ProviderItem::new(name, "command_execution", status)
+                .with("command", "ls"),
+        },
+        position: None,
+    };
+    let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
+    let mut predicted = Vec::new();
+    crate::commit_timing::enable();
+    for round in 0..20 {
+        // A command's start and end, read together.
+        let name = format!("tool-{round}");
+        let events = vec![tool(name.clone(), "running"), tool(name, "completed")];
+        let started = std::time::Instant::now();
+        let dry = host.control.dry_run(&events).await;
+        predicted.push(started.elapsed());
+        assert!(dry.iter().all(|(_, sent)| *sent > 0));
+        for event in events {
+            host.commit(event).await.unwrap();
+        }
+    }
+    let phases = crate::commit_timing::totals();
+    predicted.sort();
+    eprintln!(
+        "thread {:.1} MB; dry run of a 2-snapshot batch: median {:.2} ms, max {:.2} ms",
+        size as f64 / 1e6,
+        ms(predicted[predicted.len() / 2]),
+        ms(*predicted.last().unwrap()),
+    );
+    for (phase, (count, total)) in &phases {
+        eprintln!(
+            "  {phase:32} {count:4} x  {:.3} ms",
+            ms(*total) / *count as f64
+        );
+    }
+    host.commit(crate::Event::RunFinished {
+        run_id: run,
+        thread_id: id.clone(),
+        status: "completed".into(),
+        error: None,
+    })
+    .await
+    .unwrap();
+    store_matches_database(&host, &conn, &id);
+}
+
 /// How long a turn's snapshots hold the store on a long thread (about 5 MB),
 /// committed one at a time and as the snapshot worker's atomic batches
 /// (`commit_batch`, at most `turn::ATOMIC_BATCH` at once): every reader of

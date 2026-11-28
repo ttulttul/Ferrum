@@ -263,9 +263,12 @@ pub struct Partial {
 
 impl Partial {
     /// The partial projections of a change to `stored`, unless the change is
-    /// too big for them to be worth it.
+    /// too big for them to be worth it. With a dry run's `layer` over
+    /// `stored` (`Stored::layered`), each cut-down record comes from the layer
+    /// where it has one, else from `stored`, which is never copied whole.
     pub(crate) fn of(
         stored: &Value,
+        layer: Option<&Value>,
         computed_before: &Value,
         computed_after: &Value,
     ) -> Option<Self> {
@@ -274,29 +277,46 @@ impl Partial {
             return None;
         }
         let object = stored.as_object()?;
+        let layer = layer.and_then(Value::as_object);
+        let is_changed = |key: &str, record: &Value| {
+            record["id"]
+                .as_str()
+                .is_some_and(|id| changed.records.iter().any(|(k, i)| k == key && i == id))
+        };
+        let added = layer
+            .into_iter()
+            .flatten()
+            .filter(|(key, _)| !object.contains_key(*key));
         let mut before = Map::new();
-        for (key, value) in object {
+        for (key, value) in object.iter().chain(added) {
+            let over = layer.and_then(|layer| layer.get(key));
             let cut = LONG_COLLECTIONS.contains(&key.as_str()) && value.is_array();
-            before.insert(
-                key.clone(),
-                if cut {
-                    Value::Array(
-                        value
-                            .as_array()
-                            .into_iter()
-                            .flatten()
-                            .filter(|record| {
-                                record["id"].as_str().is_some_and(|id| {
-                                    changed.records.iter().any(|(k, i)| k == key && i == id)
-                                })
-                            })
-                            .cloned()
-                            .collect(),
-                    )
-                } else {
-                    value.clone()
-                },
-            );
+            let value = if cut {
+                let over = over.and_then(Value::as_array);
+                let base = value.as_array().into_iter().flatten();
+                let mut records: Vec<Value> = base
+                    .clone()
+                    .filter(|record| is_changed(key, record))
+                    .map(|record| {
+                        over.and_then(|over| over.iter().find(|r| r["id"] == record["id"]))
+                            .unwrap_or(record)
+                            .clone()
+                    })
+                    .collect();
+                // Records the planned commits added, after the stored ones as
+                // `overlay` adds them.
+                records.extend(
+                    over.into_iter()
+                        .flatten()
+                        .filter(|record| is_changed(key, record))
+                        .filter(|record| !base.clone().any(|r| r["id"] == record["id"]))
+                        .cloned(),
+                );
+                Value::Array(records)
+            } else {
+                over.unwrap_or(value).clone()
+            };
+            before.insert(key.clone(), value);
         }
         let before = Value::Object(before);
         let after = overlay(&before, computed_before, computed_after);
@@ -575,6 +595,18 @@ impl StoredAfter {
         }
     }
 
+    /// [`StoredAfter::install`] for a dry run, on a copy of a thread the store
+    /// still holds: a patch is laid over the thread's stored projection
+    /// instead of copying it (`Stored::layered`).
+    pub(crate) fn install_layered(self, thread: &mut crate::Thread) {
+        match (self, thread.stored.as_ref()) {
+            (StoredAfter::Patch(patch), Some(stored)) => {
+                thread.stored = Some(stored.layered(&patch.partial.after));
+            }
+            (after, _) => after.install(thread),
+        }
+    }
+
     /// The whole stored records, made from `current` (the thread's before
     /// the commit) when this is a patch.
     pub(crate) fn whole(&self, current: &Value) -> std::borrow::Cow<'_, Value> {
@@ -622,13 +654,16 @@ pub fn plan(store: &Store, record: &ServerEvent, occurred_at: &str) -> Planned {
         if let (Some(existing), Some(thread), Some(computed_before)) =
             (existing, scratch.threads.get(&thread_id), &computed_before)
         {
-            let stored = existing.stored.as_ref().expect("filtered above").get();
+            let stored = existing.stored.as_ref().expect("filtered above");
             let phase = crate::commit_timing::phase("  plan: computed after");
             let computed_after = thread.computed_full_projection();
             drop(phase);
             let phase = crate::commit_timing::phase("  plan: partial");
             let partial = (!imported)
-                .then(|| Partial::of(stored, computed_before, &computed_after))
+                .then(|| {
+                    let (base, layer) = stored.parts().expect("read by hydrate_touched");
+                    Partial::of(base, layer, computed_before, &computed_after)
+                })
                 .flatten();
             drop(phase);
             if let Some(partial) = partial {
@@ -648,7 +683,7 @@ pub fn plan(store: &Store, record: &ServerEvent, occurred_at: &str) -> Planned {
                 #[cfg(debug_assertions)]
                 check_partial_plan(
                     existing,
-                    stored,
+                    stored.get(),
                     computed_before,
                     &computed_after,
                     (&before, &after, &events),
