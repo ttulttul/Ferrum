@@ -105,11 +105,57 @@ struct Lazy {
     source: Arc<dyn Hydrate>,
 }
 
+/// A dry run's view of a stored projection after the commits it planned:
+/// `base`, as the store holds it, with `layer` over it, so the projection is
+/// not copied ([`Stored::layered`]). `layer` holds every collection whole
+/// but the long ones (`shared_store::LONG_COLLECTIONS`), which hold only the
+/// records the planned commits changed or added (a commit removes none).
+struct Layered {
+    base: Stored,
+    layer: Value,
+    whole: OnceLock<Value>,
+}
+
+impl Layered {
+    /// The whole projection, made once if something asks for it.
+    fn whole(&self) -> anyhow::Result<&Value> {
+        if let Some(whole) = self.whole.get() {
+            return Ok(whole);
+        }
+        let mut whole = self.base.try_get()?.clone();
+        merge_layer(&mut whole, &self.layer);
+        Ok(self.whole.get_or_init(|| whole))
+    }
+}
+
+/// Puts `layer`'s records over `out`: its long collections' records by id,
+/// everything else whole.
+fn merge_layer(out: &mut Value, layer: &Value) {
+    let Some(layer) = layer.as_object() else {
+        return;
+    };
+    for (key, value) in layer {
+        let long = crate::shared_store::LONG_COLLECTIONS.contains(&key.as_str());
+        match (long, value.as_array(), out[key.as_str()].as_array_mut()) {
+            (true, Some(records), Some(target)) => {
+                for record in records {
+                    match target.iter_mut().find(|r| r["id"] == record["id"]) {
+                        Some(existing) => *existing = record.clone(),
+                        None => target.push(record.clone()),
+                    }
+                }
+            }
+            _ => out[key.as_str()] = value.clone(),
+        }
+    }
+}
+
 #[derive(Clone)]
 enum Repr {
     /// Shared, so copying a thread (a commit plans on a copy) does not copy it.
     Whole(Arc<Value>),
     Lazy(Arc<Lazy>),
+    Layered(Arc<Layered>),
 }
 
 /// A thread's stored projection.
@@ -120,6 +166,7 @@ impl std::fmt::Debug for Stored {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.0 {
             Repr::Whole(_) => f.write_str("Stored::Whole"),
+            Repr::Layered(_) => f.write_str("Stored::Layered"),
             Repr::Lazy(lazy) => write!(
                 f,
                 "Stored::Lazy {{ hydrated: {} }}",
@@ -184,6 +231,7 @@ impl Stored {
         self.1.store(now_ms(), Ordering::Relaxed);
         let lazy = match &self.0 {
             Repr::Whole(projection) => return Ok(projection),
+            Repr::Layered(layered) => return layered.whole(),
             Repr::Lazy(lazy) => lazy,
         };
         if let Some(projection) = lazy.whole.get() {
@@ -239,6 +287,36 @@ impl Stored {
         })
     }
 
+    /// For a dry run: this projection after a commit planned from partial
+    /// projections, `after` (`Partial::after`) being its records cut down to
+    /// the change. The projection is not copied, as changing it in place
+    /// would copy it while the store still holds it: what the next plan reads
+    /// comes from [`Stored::parts`].
+    pub(crate) fn layered(&self, after: &Value) -> Stored {
+        let (base, mut layer) = match &self.0 {
+            Repr::Layered(layered) => (layered.base.clone(), layered.layer.clone()),
+            _ => (self.clone(), Value::Object(serde_json::Map::new())),
+        };
+        merge_layer(&mut layer, after);
+        Stored(
+            Repr::Layered(Arc::new(Layered {
+                base,
+                layer,
+                whole: OnceLock::new(),
+            })),
+            Arc::new(AtomicU64::new(now_ms())),
+        )
+    }
+
+    /// The projection as a base and, for a dry run's ([`Stored::layered`]),
+    /// the layer over it, without making it whole.
+    pub(crate) fn parts(&self) -> anyhow::Result<(&Value, Option<&Value>)> {
+        match &self.0 {
+            Repr::Layered(layered) => Ok((layered.base.try_get()?, Some(&layered.layer))),
+            _ => Ok((self.try_get()?, None)),
+        }
+    }
+
     /// Whether the whole projection is still to be read from the database.
     pub(crate) fn needs_read(&self) -> bool {
         matches!(&self.0, Repr::Lazy(lazy) if lazy.whole.get().is_none())
@@ -263,14 +341,14 @@ impl Stored {
     /// The whole projection, to change in place: read first if only the slim
     /// records are loaded, and copied only if something else still holds it.
     pub(crate) fn make_mut(&mut self) -> &mut Value {
-        if let Repr::Lazy(_) = &self.0 {
+        if let Repr::Lazy(_) | Repr::Layered(_) = &self.0 {
             let whole = self.get().clone();
             self.0 = Repr::Whole(Arc::new(whole));
         }
         self.1.store(now_ms(), Ordering::Relaxed);
         match &mut self.0 {
             Repr::Whole(projection) => Arc::make_mut(projection),
-            Repr::Lazy(_) => unreachable!("made whole above"),
+            Repr::Lazy(_) | Repr::Layered(_) => unreachable!("made whole above"),
         }
     }
 
@@ -283,13 +361,17 @@ impl Stored {
                 None => serde_json::from_str(&lazy.runs).expect("runs kept as JSON"),
             },
             Repr::Whole(whole) => whole["runs"].clone(),
+            Repr::Layered(layered) => match layered.layer.get("runs") {
+                Some(runs) => runs.clone(),
+                None => layered.base.runs(),
+            },
         }
     }
 
     /// Whether the whole projection is held in memory.
     pub(crate) fn is_resident(&self) -> bool {
         match &self.0 {
-            Repr::Whole(_) => true,
+            Repr::Whole(_) | Repr::Layered(_) => true,
             Repr::Lazy(lazy) => lazy.whole.get().is_some(),
         }
     }
@@ -305,13 +387,13 @@ impl Stored {
     pub(crate) fn release_read(&mut self) -> bool {
         match &mut self.0 {
             Repr::Lazy(lazy) => Arc::get_mut(lazy).is_some_and(|lazy| lazy.whole.take().is_some()),
-            Repr::Whole(_) => false,
+            Repr::Whole(_) | Repr::Layered(_) => false,
         }
     }
 
     /// Whether this is a projection a commit planned (not one read lazily).
     pub(crate) fn is_planned(&self) -> bool {
-        matches!(self.0, Repr::Whole(_))
+        matches!(self.0, Repr::Whole(_) | Repr::Layered(_))
     }
 
     /// While only the slim records are loaded: the shell row they give
